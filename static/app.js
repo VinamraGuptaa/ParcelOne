@@ -165,6 +165,13 @@ function clearPolling() {
 async function pollJobStatus(jobId) {
   try {
     const res = await fetch(`${API_BASE}/jobs/${jobId}`);
+    if (res.status === 404) {
+      clearPolling();
+      currentJobId = null;
+      hideProgress();
+      setFormDisabled(false);
+      return;
+    }
     if (!res.ok) return;
     const job = await res.json();
 
