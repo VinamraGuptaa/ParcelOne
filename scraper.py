@@ -53,6 +53,10 @@ class ECourtsScraper:
 
     async def setup_driver(self):
         """Launch Playwright Chromium browser and create a page."""
+        import time
+        browsers_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "~/.cache/ms-playwright")
+        logger.info(f"Launching Playwright Chromium (headless={self.headless}, browsers_path={browsers_path})...")
+        t0 = time.monotonic()
         self._playwright = await async_playwright().start()
         self.browser = await self._playwright.chromium.launch(
             headless=self.headless,
@@ -62,6 +66,7 @@ class ECourtsScraper:
                 "--disable-gpu",
             ],
         )
+        logger.info(f"Chromium launched in {time.monotonic() - t0:.1f}s.")
         self.context = await self.browser.new_context(
             viewport={"width": 1920, "height": 1080},
             user_agent=(
@@ -74,7 +79,7 @@ class ECourtsScraper:
 
         # Auto-accept any JS alert dialogs
         self.page.on("dialog", lambda d: asyncio.create_task(d.accept()))
-        logger.info("Playwright Chromium browser initialized.")
+        logger.info("Playwright browser ready.")
 
     async def close(self):
         """Close the browser and stop Playwright."""
@@ -94,8 +99,11 @@ class ECourtsScraper:
           Maharashtra → Pune → Pune District and Sessions Court
         Also selects 'Both' for case status (Pending + Disposed).
         """
-        logger.info(f"Navigating to: {BASE_URL}")
+        import time
+        logger.info(f"Navigating to eCourts portal...")
+        t0 = time.monotonic()
         await self.page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30000)
+        logger.info(f"Page loaded in {time.monotonic() - t0:.1f}s.")
         await asyncio.sleep(3)
 
         # Select State: Maharashtra
@@ -301,7 +309,9 @@ class ECourtsScraper:
         Returns:
             List of enriched case detail dicts.
         """
-        logger.info(f"Searching for petitioner: '{name}', year: '{year or 'all'}'")
+        import time
+        logger.info(f"==> Search start: petitioner='{name}' year='{year or 'all'}'")
+        t0 = time.monotonic()
 
         await self.page.wait_for_selector("#petres_name", timeout=20000)
         await self.page.fill("#petres_name", name)
@@ -347,14 +357,14 @@ class ECourtsScraper:
                 await asyncio.sleep(1)
                 continue
 
-            logger.info("Captcha accepted! Parsing results...")
+            logger.info(f"Captcha accepted on attempt {attempt} ({time.monotonic() - t0:.1f}s). Parsing results...")
             try:
                 await self.page.screenshot(path="/tmp/ecourts_after_submit.png")
             except Exception:
                 pass
             return await self.parse_results()
 
-        logger.error("Failed to solve captcha after maximum retries.")
+        logger.error(f"Failed to solve captcha after {MAX_CAPTCHA_RETRIES} retries ({time.monotonic() - t0:.1f}s elapsed).")
         return []
 
     # ------------------------------------------------------------------ #
@@ -379,20 +389,21 @@ class ECourtsScraper:
             if not summary_rows:
                 return []
 
-            logger.info(f"Found {len(summary_rows)} case(s). Fetching details...")
+            logger.info(f"Found {len(summary_rows)} case(s) in summary table. Fetching details...")
             enriched = []
             for idx, summary in enumerate(summary_rows):
+                import time as _time
                 view_js = summary.pop("_view_js", None)
-                logger.info(
-                    f"Fetching detail {idx + 1}/{len(summary_rows)}: "
-                    f"{summary.get('Case Type/Case Number/Case Year', '')}"
-                )
+                case_ref = summary.get('Case Type/Case Number/Case Year', f'row {idx+1}')
+                logger.info(f"  [{idx+1}/{len(summary_rows)}] Fetching detail: {case_ref}")
+                t_detail = _time.monotonic()
                 detail = await self._fetch_detail_by_onclick(view_js) if view_js else {}
+                logger.info(f"  [{idx+1}/{len(summary_rows)}] Detail fetched in {_time.monotonic() - t_detail:.1f}s ({len(detail)} fields)")
                 merged = {**summary, **detail} if detail else summary
                 enriched.append(merged)
                 await self._rate_limit_delay()
 
-            logger.info(f"Parsed {len(enriched)} case records with details.")
+            logger.info(f"==> All details fetched: {len(enriched)} case record(s) complete.")
             return enriched
 
         except Exception as e:

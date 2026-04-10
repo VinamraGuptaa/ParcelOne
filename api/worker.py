@@ -73,10 +73,13 @@ async def run_scrape_job(job_id: str) -> None:
       4. Insert Case rows after each year
       5. Mark job as done (or failed on exception)
     """
+    logger.info(f"==> Worker task started for job {job_id}")
+
     # Import here to avoid circular imports at module load time
     from scraper import ECourtsScraper
 
     scraper = ECourtsScraper(headless=True)
+    logger.info(f"ECourtsScraper instantiated (headless=True)")
 
     async with AsyncSessionLocal() as db:
         # Load the job
