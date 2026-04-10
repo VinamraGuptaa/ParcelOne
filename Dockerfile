@@ -1,4 +1,4 @@
-# ── eCourts Scraper — Railway deployment ─────────────────────────────────
+# ── eCourts Scraper — Render (Docker) deployment ──────────────────────────
 # Uses python:3.11-slim and installs Playwright Chromium with all system deps.
 
 FROM python:3.11-slim

@@ -1,17 +1,9 @@
 services:
   - type: web
     name: ecourts-scraper
-    runtime: python
+    runtime: docker
     region: oregon
     plan: free
-
-    buildCommand: |
-      pip install uv --quiet
-      uv sync --no-dev --frozen
-      PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/src/.playwright uv run playwright install chromium
-      PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/src/.playwright uv run playwright install-deps chromium
-
-    startCommand: uv run python server.py
 
     envVars:
       - key: DATABASE_URL
@@ -22,12 +14,6 @@ services:
         value: "*"
       - key: MAX_JOBS
         value: "10"
-      - key: PORT
-        value: "8000"
-      - key: PYTHON_VERSION
-        value: "3.11.9"
-      - key: PLAYWRIGHT_BROWSERS_PATH
-        value: /opt/render/project/src/.playwright
 
 databases:
   - name: ecourts-db
