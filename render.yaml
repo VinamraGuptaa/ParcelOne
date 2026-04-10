@@ -2,7 +2,7 @@ services:
   - type: web
     name: ecourts-scraper
     runtime: python
-    region: singapore   # closest to India; change to "oregon" if preferred
+    region: oregon
     plan: free
 
     buildCommand: |
@@ -30,4 +30,4 @@ services:
 databases:
   - name: ecourts-db
     plan: free
-    region: singapore
+    region: oregon
