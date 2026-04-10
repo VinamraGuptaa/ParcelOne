@@ -55,14 +55,14 @@ def create_app() -> FastAPI:
 
         async with AsyncSessionLocal() as db:
             result = await db.execute(
-                select(SearchJob).where(SearchJob.status == "running")
+                select(SearchJob).where(SearchJob.status.in_(["running", "pending"]))
             )
             orphans = result.scalars().all()
             if not orphans:
                 return
             for job in orphans:
                 job.status = "failed"
-                job.error_message = "Server restarted while scrape was in progress."
+                job.error_message = "Server restarted before scrape could complete."
                 job.finished_at = datetime.now(timezone.utc)
             await db.commit()
             logger.warning(
