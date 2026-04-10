@@ -1,0 +1,5 @@
+selenium
+Pillow
+pytesseract
+webdriver-manager
+pandas
