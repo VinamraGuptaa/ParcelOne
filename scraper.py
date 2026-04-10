@@ -62,8 +62,11 @@ class ECourtsScraper:
             headless=self.headless,
             args=[
                 "--no-sandbox",
+                "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
+                "--no-zygote",
+                "--single-process",
             ],
         )
         logger.info(f"Chromium launched in {time.monotonic() - t0:.1f}s.")
