@@ -1,0 +1,32 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Environment / secrets
+.env
+*.env
+
+# Local SQLite database
+*.db
+*.db-shm
+*.db-wal
+
+# Playwright browsers
+/ms-playwright/
+
+# Scraper CSV output files
+*.csv
+
+# Temp files written by scraper
+/tmp/ecourts_*.png
+/tmp/ecourts_*.html
+
+# macOS
+.DS_Store

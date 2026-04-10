@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>eCourts India — Case Search</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <header>
+    <h1>eCourts India — Case Search</h1>
+    <p>Search case records by petitioner / respondent name</p>
+  </header>
+
+  <!-- Server wake-up banner (Render free tier cold start) -->
+  <div id="wake-banner" class="banner banner-info" style="display:none;">
+    <span class="icon">&#9677;</span>
+    <span>Waking up the server&hellip; this takes about 30&ndash;60 seconds on first use.</span>
+    <span class="spinner"></span>
+  </div>
+
+  <!-- Error banner -->
+  <div id="error-banner" class="banner banner-error" style="display:none;">
+    <span class="icon">&#9888;</span>
+    <span id="error-text"></span>
+  </div>
+
+  <!-- Search form card -->
+  <div class="card">
+    <div class="card-title">Search Cases</div>
+    <form id="search-form" autocomplete="off">
+      <div class="form-row">
+        <div class="form-group">
+          <label for="petitioner-name">Petitioner / Respondent Name</label>
+          <input
+            id="petitioner-name"
+            type="text"
+            placeholder="e.g. Rajesh Gupta"
+            minlength="3"
+            required
+          />
+        </div>
+        <div class="form-group">
+          <label for="year">Year (optional)</label>
+          <input
+            id="year"
+            type="text"
+            placeholder="e.g. 2019"
+            maxlength="4"
+          />
+        </div>
+        <div class="form-group">
+          <label>&nbsp;</label>
+          <button id="submit-btn" class="btn btn-primary" type="submit">
+            Search Cases
+          </button>
+        </div>
+      </div>
+      <div style="margin-top:10px;">
+        <span class="court-badge">
+          &#x1F3DB; Maharashtra &rsaquo; Pune &rsaquo; Pune, District and Sessions Court &rsaquo; Both (Pending + Disposed)
+        </span>
+      </div>
+    </form>
+  </div>
+
+  <!-- Progress card -->
+  <div id="progress-section" class="card">
+    <div class="card-title">
+      <span class="spinner"></span>&nbsp; Scraping in progress&hellip;
+    </div>
+    <div class="progress-label">
+      <span id="progress-pct-label">0%</span>
+      <span id="progress-years-label"></span>
+    </div>
+    <div class="progress-track">
+      <div id="progress-fill" class="progress-fill"></div>
+    </div>
+    <p id="progress-msg" class="progress-msg">Starting&hellip;</p>
+  </div>
+
+  <!-- Results card -->
+  <div id="results-section" class="card">
+    <div class="results-header">
+      <h2 id="results-title">Results</h2>
+      <div class="results-actions">
+        <button id="download-btn" class="btn btn-outline btn-sm" onclick="downloadCSV()">
+          Download CSV
+        </button>
+        <button class="btn btn-primary btn-sm" onclick="resetToSearch()">
+          New Search
+        </button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table id="cases-table">
+        <thead><tr><th>Loading&hellip;</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Busy dialog — shown when a scrape is already running -->
+  <div id="busy-overlay" class="modal-overlay" style="display:none;" onclick="hideBusyDialog()">
+    <div class="modal-box" onclick="event.stopPropagation()">
+      <div class="modal-icon">&#9203;</div>
+      <h2 class="modal-title">Scrape in Progress</h2>
+      <p class="modal-body" id="busy-msg">A scrape is already running. Please wait for it to finish before starting a new search.</p>
+      <button class="btn btn-primary" onclick="hideBusyDialog()">OK, I'll Wait</button>
+    </div>
+  </div>
+
+  <!-- Past searches card -->
+  <div id="history-section" class="card">
+    <div class="card-title">Past Searches</div>
+    <div id="history-list" class="history-list"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
