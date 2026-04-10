@@ -17,6 +17,17 @@ dependencies = [
     "uvicorn[standard]>=0.44.0",
 ]
 
+# Use CPU-only PyTorch — avoids the 2.5GB CUDA build (we do CPU inference only).
+# This brings the Docker image from ~6.5GB down to ~2GB, under Railway's 4GB limit.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
 [tool.uv]
 dev-dependencies = [
     "pytest>=8.0",

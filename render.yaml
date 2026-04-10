@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: ecourts-scraper
+    runtime: python
+    region: singapore   # closest to India; change to "oregon" if preferred
+    plan: free
+
+    buildCommand: |
+      pip install uv --quiet
+      uv sync --no-dev --frozen
+      uv run playwright install chromium
+      uv run playwright install-deps chromium
+
+    startCommand: uv run python server.py
+
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ecourts-db
+          property: connectionString
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: MAX_JOBS
+        value: "10"
+      - key: PORT
+        value: "8000"
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+
+databases:
+  - name: ecourts-db
+    plan: free
+    region: singapore
