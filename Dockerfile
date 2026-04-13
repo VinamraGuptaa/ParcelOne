@@ -44,6 +44,11 @@ RUN pip install uv --no-cache-dir && \
 # Install Playwright's Chromium browser
 RUN uv run playwright install chromium
 
+# Pre-download RapidOCR ONNX models so they're cached in the image.
+# Without this, first captcha solve downloads ~15MB at runtime, causing
+# a ~60s delay that can trigger Render's health check timeout.
+RUN uv run python -c "from rapidocr_onnxruntime import RapidOCR; RapidOCR()"
+
 EXPOSE 8000
 
 CMD ["uv", "run", "python", "server.py"]
