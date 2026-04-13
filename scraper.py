@@ -18,7 +18,8 @@ from playwright.async_api import async_playwright, Page, BrowserContext, Browser
 from bs4 import BeautifulSoup
 import pandas as pd
 
-import captcha_solver
+# captcha_solver is imported lazily inside solve_captcha() to defer torch
+# loading until after Chromium is already running (saves ~400MB at launch time)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -211,6 +212,7 @@ class ECourtsScraper:
 
     async def solve_captcha(self) -> Optional[str]:
         """Screenshot the captcha element and solve it with EasyOCR."""
+        import captcha_solver  # deferred: importing easyocr/torch here keeps RAM free at launch
         captcha_path = "/tmp/ecourts_captcha.png"
         try:
             captcha_img = self.page.locator("#captcha_image")
