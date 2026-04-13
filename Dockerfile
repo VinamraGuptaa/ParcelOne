@@ -38,8 +38,11 @@ COPY pyproject.toml uv.lock ./
 COPY . .
 
 # Install uv and project dependencies
+# Force opencv-python-headless over full opencv to avoid display/GPU crashes
+# in headless Docker (full opencv tries to init display libs and can segfault)
 RUN pip install uv --no-cache-dir && \
-    uv sync --no-dev --frozen
+    uv sync --no-dev --frozen && \
+    uv run pip install --force-reinstall opencv-python-headless
 
 # Install Playwright's Chromium browser
 RUN uv run playwright install chromium
