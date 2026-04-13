@@ -369,8 +369,9 @@ class ECourtsScraper:
                 pass
             return await self.parse_results()
 
-        logger.error(f"Failed to solve captcha after {MAX_CAPTCHA_RETRIES} retries ({time.monotonic() - t0:.1f}s elapsed).")
-        return []
+        msg = f"Failed to solve captcha after {MAX_CAPTCHA_RETRIES} retries ({time.monotonic() - t0:.1f}s elapsed)."
+        logger.error(msg)
+        raise RuntimeError(msg)
 
     # ------------------------------------------------------------------ #
     #  Results parsing

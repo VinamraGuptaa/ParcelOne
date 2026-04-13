@@ -151,6 +151,20 @@ async def run_scrape_job(job_id: str) -> None:
 
                     records = await scraper.search_petitioner(job.petitioner_name, year)
 
+            except RuntimeError as e:
+                # Captcha exhausted or hard scraper error — fail the job immediately
+                msg = str(e)
+                logger.error(f"Job {job_id} failed on year {year}: {msg}")
+                async with AsyncSessionLocal() as db:
+                    result = await db.execute(select(SearchJob).where(SearchJob.id == job_id))
+                    job = result.scalar_one_or_none()
+                    if job:
+                        job.status = "failed"
+                        job.error_message = msg
+                        job.finished_at = _now()
+                        await db.commit()
+                return
+
             except TimeoutError:
                 mins, secs = year_timeout // 60, year_timeout % 60
                 msg = (
