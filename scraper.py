@@ -343,16 +343,32 @@ class ECourtsScraper:
                 continue
 
             await self.page.fill("#fcaptcha_code", captcha_text)
+            logger.info(f"Captcha filled: '{captcha_text}'. Clicking Go...")
 
-            # Click the Go button
-            try:
-                go_btn = self.page.locator("button:has-text('Go'), button:has-text('go')")
-                if await go_btn.count() > 0:
-                    await go_btn.first.click()
-                else:
-                    await self.page.locator("button.btn-primary").first.click()
-            except Exception:
-                await self.page.locator("button.btn-primary").first.click()
+            # Click the Go button — try multiple selectors with explicit waits
+            clicked = False
+            for selector in [
+                "button:has-text('Go')",
+                "button:has-text('go')",
+                "input[type='submit']",
+                "button.btn-primary",
+                "button[type='submit']",
+            ]:
+                try:
+                    btn = self.page.locator(selector).first
+                    await btn.wait_for(state="visible", timeout=5000)
+                    await btn.click()
+                    logger.info(f"Clicked Go button via selector: {selector}")
+                    clicked = True
+                    break
+                except Exception:
+                    continue
+
+            if not clicked:
+                logger.warning("Could not find Go button — trying JS submit")
+                await self.page.evaluate(
+                    "document.querySelector('form')?.submit()"
+                )
 
             await asyncio.sleep(3)
 
