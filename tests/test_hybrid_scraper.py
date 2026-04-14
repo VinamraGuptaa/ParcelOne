@@ -651,6 +651,19 @@ class TestHTTPFetchDetail:
         result = await scraper._http_fetch_detail(client, self.VALID_VIEW_JS)
         assert result == {}
 
+    async def test_transient_http_error_retries_then_succeeds(self):
+        scraper = self._make_scraper()
+        client = _mock_client()
+        client.post = AsyncMock(
+            side_effect=[
+                httpx.ReadError("disconnect"),
+                _make_http_response(text=DETAIL_HTML),
+            ]
+        )
+        detail = await scraper._http_fetch_detail(client, self.VALID_VIEW_JS)
+        assert detail.get("Case_Type") == "R.C.A. - Regular Civil Appeal"
+        assert client.post.call_count == 2
+
 
 # ── search_petitioner ─────────────────────────────────────────────────────────
 

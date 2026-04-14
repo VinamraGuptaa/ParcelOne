@@ -47,6 +47,7 @@ MAX_CAPTCHA_RETRIES = 5
 DEBUG_ARTIFACTS = os.getenv("SCRAPER_DEBUG_ARTIFACTS", "") == "1"
 HTTP_TIMEOUT_SECONDS = 45.0
 CAPTCHA_FETCH_RETRIES = 3
+DETAIL_FETCH_RETRIES = 3
 
 # ── Hybrid HTTP endpoints (confirmed via live site inspection) ────────────────
 # Pune District Court — values taken directly from the live page's form fields
@@ -1444,31 +1445,43 @@ class HybridECourtsScraper(ECourtsScraper):
             return {}
 
         s = self._session
-        try:
-            resp = await client.post(
-                _VIEW_HISTORY_URL,
-                data={
-                    "court_code": args[2],
-                    "state_code": args[5] if len(args) > 5 else _STATE_CODE,
-                    "dist_code": args[6] if len(args) > 6 else _DIST_CODE,
-                    "court_complex_code": args[7]
-                    if len(args) > 7
-                    else _COURT_COMPLEX_CODE,
-                    "case_no": args[0],
-                    "cino": args[1],
-                    "hideparty": args[3] if len(args) > 3 else "",
-                    "search_flag": args[4] if len(args) > 4 else "CScaseNumber",
-                    "search_by": args[8] if len(args) > 8 else "CSpartyName",
-                    "ajax_req": "true",
-                    "app_token": s.app_token,
-                },
-            )
-            resp.raise_for_status()
-            html = self._unwrap_ajax_html(resp.text)
-            return await self._parse_detail_page(html=html)
-        except Exception as e:
-            logger.error(f"[Hybrid] viewHistory fetch failed: {e}")
-            return {}
+        for attempt in range(1, DETAIL_FETCH_RETRIES + 1):
+            try:
+                resp = await client.post(
+                    _VIEW_HISTORY_URL,
+                    data={
+                        "court_code": args[2],
+                        "state_code": args[5] if len(args) > 5 else _STATE_CODE,
+                        "dist_code": args[6] if len(args) > 6 else _DIST_CODE,
+                        "court_complex_code": args[7]
+                        if len(args) > 7
+                        else _COURT_COMPLEX_CODE,
+                        "case_no": args[0],
+                        "cino": args[1],
+                        "hideparty": args[3] if len(args) > 3 else "",
+                        "search_flag": args[4] if len(args) > 4 else "CScaseNumber",
+                        "search_by": args[8] if len(args) > 8 else "CSpartyName",
+                        "ajax_req": "true",
+                        "app_token": s.app_token,
+                    },
+                )
+                resp.raise_for_status()
+                html = self._unwrap_ajax_html(resp.text)
+                return await self._parse_detail_page(html=html)
+            except (httpx.RequestError, httpx.TimeoutException) as e:
+                logger.warning(
+                    f"[Hybrid] viewHistory transient error "
+                    f"({attempt}/{DETAIL_FETCH_RETRIES}): {e}"
+                )
+                if attempt < DETAIL_FETCH_RETRIES:
+                    await asyncio.sleep(min(2 * attempt, 5))
+                    continue
+                logger.error(f"[Hybrid] viewHistory fetch failed after retries: {e}")
+                return {}
+            except Exception as e:
+                logger.error(f"[Hybrid] viewHistory fetch failed: {e}")
+                return {}
+        return {}
 
     # ── Public overrides ────────────────────────────────────────────────────
 
@@ -1485,6 +1498,14 @@ class HybridECourtsScraper(ECourtsScraper):
         all_results: list[dict] = []
 
         for i, year in enumerate(years):
+            # Reset keep-alive connections between years to reduce stale/upstream
+            # disconnect issues during long runs.
+            maybe_client_open = self._open_http_client()
+            if asyncio.iscoroutine(maybe_client_open):
+                await maybe_client_open
+            http = self._http
+            assert http is not None
+
             if not self._session_is_fresh():
                 logger.info("[Hybrid] Session stale — re-bootstrapping...")
                 await self.bootstrap_session()
