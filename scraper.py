@@ -694,20 +694,44 @@ class ECourtsScraper:
                             return _normalize_fragment(sibling.decode_contents())
                 return ""
 
-            detail["Case_Type"] = get_field("Case Type")
-            detail["Filing_Number"] = get_field("Filing Number")
-            detail["Filing_Date"] = get_field("Filing Date")
-            detail["Registration_Number"] = get_field("Registration Number")
-            detail["Registration_Date"] = get_field("Registration Date")
-            detail["eFiling_Number"] = get_field("e-Filing Number")
-            detail["eFiling_Date"] = get_field("e-Filing Date")
+            def _norm_label(label: str) -> str:
+                return _re.sub(r"[^a-z0-9]+", " ", label.lower()).strip()
+
+            kv: dict[str, str] = {}
+            for row in soup.find_all("tr"):
+                cells = row.find_all(["th", "td"])
+                if len(cells) < 2:
+                    continue
+                label = _norm_label(cells[0].get_text(separator=" ", strip=True))
+                value = _normalize_fragment(cells[1].decode_contents())
+                if label and value and label not in kv:
+                    kv[label] = value
+
+            def get_field_fuzzy(*labels: str) -> str:
+                for lbl in labels:
+                    v = get_field(lbl)
+                    if v:
+                        return v
+                targets = [_norm_label(lbl) for lbl in labels]
+                for key, value in kv.items():
+                    if any(t in key for t in targets):
+                        return value
+                return ""
+
+            detail["Case_Type"] = get_field_fuzzy("Case Type")
+            detail["Filing_Number"] = get_field_fuzzy("Filing Number")
+            detail["Filing_Date"] = get_field_fuzzy("Filing Date")
+            detail["Registration_Number"] = get_field_fuzzy("Registration Number")
+            detail["Registration_Date"] = get_field_fuzzy("Registration Date")
+            detail["eFiling_Number"] = get_field_fuzzy("e-Filing Number", "e Filing Number")
+            detail["eFiling_Date"] = get_field_fuzzy("e-Filing Date", "e Filing Date")
 
             # CNR Number — value is in a span.text-danger rather than the td text
             cnr_span = soup.select_one(
                 "span.text-danger.text-uppercase, span.fw-bold.text-uppercase"
             )
             detail["CNR_Number"] = (
-                cnr_span.get_text(strip=True) if cnr_span else get_field("CNR Number")
+                cnr_span.get_text(strip=True) if cnr_span else get_field_fuzzy("CNR Number")
             )
 
             # Under Act(s) — header is a th; data rows follow
@@ -726,13 +750,13 @@ class ECourtsScraper:
                             acts.append(text)
                 detail["Under_Acts"] = " | ".join(acts)
 
-            detail["First_Hearing_Date"] = get_field("First Hearing Date")
-            detail["Next_Hearing_Date"] = get_field("Next Hearing Date")
-            detail["Case_Stage"] = get_field("Case Stage")
-            detail["Decision_Date"] = get_field("Decision Date")
-            detail["Case_Status"] = get_field("Case Status")
-            detail["Nature_of_Disposal"] = get_field("Nature of Disposal")
-            detail["Court_Number_Judge"] = get_field("Court Number and Judge")
+            detail["First_Hearing_Date"] = get_field_fuzzy("First Hearing Date")
+            detail["Next_Hearing_Date"] = get_field_fuzzy("Next Hearing Date")
+            detail["Case_Stage"] = get_field_fuzzy("Case Stage")
+            detail["Decision_Date"] = get_field_fuzzy("Decision Date")
+            detail["Case_Status"] = get_field_fuzzy("Case Status")
+            detail["Nature_of_Disposal"] = get_field_fuzzy("Nature of Disposal")
+            detail["Court_Number_Judge"] = get_field_fuzzy("Court Number and Judge")
 
             # Petitioner / Respondent
             pet_ul = soup.select_one("ul.petitioner-advocate-list")
@@ -742,7 +766,7 @@ class ECourtsScraper:
                     section="petitioner",
                 )
             else:
-                pet_from_field = get_field("Petitioner and Advocate")
+                pet_from_field = get_field_fuzzy("Petitioner and Advocate")
                 if pet_from_field:
                     detail["Petitioner_and_Advocate"] = _clean_party_block(
                         pet_from_field,
@@ -756,7 +780,7 @@ class ECourtsScraper:
                     section="respondent",
                 )
             else:
-                res_from_field = get_field("Respondent and Advocate")
+                res_from_field = get_field_fuzzy("Respondent and Advocate")
                 if res_from_field:
                     detail["Respondent_and_Advocate"] = _clean_party_block(
                         res_from_field,
@@ -1037,16 +1061,17 @@ class HybridECourtsScraper(ECourtsScraper):
         AJAX endpoints wrap HTML inside a JSON envelope.
         Try common key names; fall back to raw text if not JSON or no known key.
         """
+        key_order = ("party_data", "tab_data", "html", "data", "case_history")
         try:
             data = _json.loads(raw)
             if isinstance(data, dict):
-                for key in ("party_data", "case_history", "tab_data", "html", "data"):
+                for key in key_order:
                     if key in data and isinstance(data[key], str):
                         return data[key]
         except Exception:
             # Some responses are almost-JSON strings that fail strict parsing.
             # Best-effort extract the key payload and decode escapes.
-            for key in ("party_data", "case_history", "tab_data", "html", "data"):
+            for key in key_order:
                 m = _re.search(rf'"{key}"\s*:\s*"((?:\\.|[^"\\])*)"', raw)
                 if m:
                     payload = m.group(1)

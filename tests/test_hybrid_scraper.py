@@ -949,3 +949,11 @@ class TestUnwrapAjaxHtml:
         html = HybridECourtsScraper._unwrap_ajax_html(raw)
         assert "Petitioner and Advocate" in html
         assert "<\\/h3>" not in html
+
+    def test_unwrap_ajax_html_prefers_tab_data_over_case_history(self):
+        raw = (
+            '{"case_history":"<div>history</div>",'
+            '"tab_data":"<table><tr><td>Case Type</td><td>R.C.A.</td></tr></table>"}'
+        )
+        html = HybridECourtsScraper._unwrap_ajax_html(raw)
+        assert "Case Type" in html
