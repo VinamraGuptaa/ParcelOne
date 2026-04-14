@@ -182,6 +182,64 @@ DETAIL_ESCAPED_FRAGMENT_HTML = r"""
 </body></html>
 """
 
+DETAIL_MERGED_BLOB_HTML = """
+<html><body>
+<table>
+  <tr>
+    <td>Case Type</td>
+    <td>
+      R.C.A. - Regular Civil Appeal
+      Filing Number 1252/2017
+      Filing Date 16-02-2017
+      Registration Number 181/2017
+      Registration Date 21-03-2017
+      CNR Number MHPU010023222017
+      First Hearing Date 21st March 2017
+      Decision Date 21st September 2021
+      Case Status Case disposed
+      Court Number and Judge 53-DISTRICT JUDGE -15
+    </td>
+  </tr>
+</table>
+</body></html>
+"""
+
+DETAIL_FLAT_TEXT_BLOB_HTML = """
+<html><body>
+<div>
+Case Type R.C.A. - Regular Civil Appeal
+Filing Number 1252/2017
+Filing Date 16-02-2017
+Registration Number 181/2017
+Registration Date 21-03-2017
+CNR Number MHPU010023222017
+First Hearing Date 21st March 2017
+Next Hearing Date 10-12-2025
+Case Stage Awaiting R and P
+Decision Date 21st September 2021
+Case Status Case disposed
+Nature of Disposal Uncontested--ALLOWED OTHERWISE
+Court Number and Judge 53-DISTRICT JUDGE -15
+</div>
+</body></html>
+"""
+
+DETAIL_FLAT_TEXT_NO_DECISION_HTML = """
+<html><body>
+<div>
+Case Type R.C.A. - Regular Civil Appeal
+Filing Number 1252/2017
+Filing Date 16-02-2017
+Registration Number 181/2017
+Registration Date 21-03-2017
+CNR Number MHPU010023222017
+Case Status Case disposed
+Nature of Disposal Uncontested--ALLOWED OTHERWISE
+Court Number and Judge 53-DISTRICT JUDGE -15
+</div>
+</body></html>
+"""
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -421,6 +479,32 @@ class TestParseDetailPage:
         assert "\\n" not in detail["Petitioner_and_Advocate"]
         assert "<\\/li>" not in detail["Petitioner_and_Advocate"]
 
+    async def test_merged_blob_is_split_into_distinct_fields(self):
+        scraper = _scraper_with_html(DETAIL_MERGED_BLOB_HTML)
+        detail = await scraper._parse_detail_page()
+        assert detail["Case_Type"] == "R.C.A. - Regular Civil Appeal"
+        assert detail["Filing_Number"] == "1252/2017"
+        assert detail["Registration_Number"] == "181/2017"
+        assert detail["CNR_Number"] == "MHPU010023222017"
+        assert "eFiling_Number" not in detail
+        assert "eFiling_Date" not in detail
+
+    async def test_flat_text_blob_populates_structured_fields(self):
+        scraper = _scraper_with_html(DETAIL_FLAT_TEXT_BLOB_HTML)
+        detail = await scraper._parse_detail_page()
+        assert detail["Case_Type"] == "R.C.A. - Regular Civil Appeal"
+        assert detail["Filing_Number"] == "1252/2017"
+        assert detail["Filing_Date"] == "16-02-2017"
+        assert detail["Registration_Number"] == "181/2017"
+        assert detail["Registration_Date"] == "21-03-2017"
+        assert detail["CNR_Number"] == "MHPU010023222017"
+        assert detail["Case_Status"] == "Case disposed"
+
+    async def test_decision_date_not_backfilled_from_blob_when_missing(self):
+        scraper = _scraper_with_html(DETAIL_FLAT_TEXT_NO_DECISION_HTML)
+        detail = await scraper._parse_detail_page()
+        assert "Decision_Date" not in detail
+
 
 # ── _get_available_years ──────────────────────────────────────────────────────
 
@@ -502,5 +586,19 @@ class TestExportToCsv:
             ECourtsScraper.export_to_csv(data, path)
             df = pd.read_csv(path, encoding="utf-8-sig")
             assert len(df) == 5
+        finally:
+            os.unlink(path)
+
+    def test_optional_efiling_columns_always_present(self):
+        import pandas as pd
+        data = [{"Filing_Number": "1252/2017", "Case_Type": "R.C.A."}]
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+            path = f.name
+        try:
+            ECourtsScraper.export_to_csv(data, path)
+            df = pd.read_csv(path, encoding="utf-8-sig")
+            assert "Filing_Number" in df.columns
+            assert "eFiling_Number" in df.columns
+            assert "eFiling_Date" in df.columns
         finally:
             os.unlink(path)

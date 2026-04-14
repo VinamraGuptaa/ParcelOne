@@ -714,8 +714,48 @@ class ECourtsScraper:
                         return v
                 targets = [_norm_label(lbl) for lbl in labels]
                 for key, value in kv.items():
-                    if any(t in key for t in targets):
+                    if any(key == t for t in targets):
                         return value
+                return ""
+
+            def _extract_from_flat_text(flat_text: str, label: str, all_labels: list[str]) -> str:
+                escaped = [ _re.escape(lbl) for lbl in all_labels if lbl != label ]
+                next_labels = "|".join(escaped)
+                if not next_labels:
+                    return ""
+                pattern = rf"{_re.escape(label)}\s*(.*?)\s*(?=(?:{next_labels})\b|$)"
+                m = _re.search(pattern, flat_text, flags=_re.IGNORECASE | _re.DOTALL)
+                if not m:
+                    return ""
+                return _normalize_fragment(m.group(1))
+
+            def _looks_merged(v: str) -> bool:
+                if not v:
+                    return False
+                markers = ("Case Type", "Filing Number", "Registration Number", "CNR Number")
+                return len(v) > 120 and sum(1 for mk in markers if mk in v) >= 2
+
+            def _normalize_decision_date(value: str) -> str:
+                """Keep decision date only when it looks like a real date token."""
+                if not value:
+                    return ""
+                text = value.strip()
+                # Common formats from eCourts pages.
+                date_patterns = (
+                    r"\b\d{1,2}-\d{1,2}-\d{4}\b",
+                    r"\b\d{1,2}/\d{1,2}/\d{4}\b",
+                    r"\b\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+\s+\d{4}\b",
+                )
+                for pat in date_patterns:
+                    m = _re.search(pat, text, flags=_re.IGNORECASE)
+                    if m:
+                        return m.group(0)
+                # If this contains other labels, it's likely spillover text.
+                if any(
+                    marker in text
+                    for marker in ("Case Status", "Nature of Disposal", "Court Number", "Under Act")
+                ):
+                    return ""
                 return ""
 
             detail["Case_Type"] = get_field_fuzzy("Case Type")
@@ -733,6 +773,10 @@ class ECourtsScraper:
             detail["CNR_Number"] = (
                 cnr_span.get_text(strip=True) if cnr_span else get_field_fuzzy("CNR Number")
             )
+            if detail.get("CNR_Number"):
+                cnr_match = _re.search(r"\b[A-Z]{4}[A-Z0-9]{8,}\b", detail["CNR_Number"])
+                if cnr_match:
+                    detail["CNR_Number"] = cnr_match.group(0)
 
             # Under Act(s) — header is a th; data rows follow
             act_th = soup.find(
@@ -757,6 +801,70 @@ class ECourtsScraper:
             detail["Case_Status"] = get_field_fuzzy("Case Status")
             detail["Nature_of_Disposal"] = get_field_fuzzy("Nature of Disposal")
             detail["Court_Number_Judge"] = get_field_fuzzy("Court Number and Judge")
+
+            # Some responses collapse many key/value pairs into one giant text blob.
+            # Re-split from flattened text to recover canonical field values.
+            scalar_label_map = {
+                "Case_Type": "Case Type",
+                "Filing_Number": "Filing Number",
+                "Filing_Date": "Filing Date",
+                "Registration_Number": "Registration Number",
+                "Registration_Date": "Registration Date",
+                "CNR_Number": "CNR Number",
+                "eFiling_Number": "e-Filing Number",
+                "eFiling_Date": "e-Filing Date",
+                "First_Hearing_Date": "First Hearing Date",
+                "Next_Hearing_Date": "Next Hearing Date",
+                "Case_Stage": "Case Stage",
+                "Decision_Date": "Decision Date",
+                "Case_Status": "Case Status",
+                "Nature_of_Disposal": "Nature of Disposal",
+                "Court_Number_Judge": "Court Number and Judge",
+            }
+            flat_text = _normalize_fragment(soup.get_text(separator="\n", strip=True))
+            all_labels = list(scalar_label_map.values()) + [
+                "Petitioner and Advocate",
+                "Respondent and Advocate",
+                "Under Act(s)",
+            ]
+            merged_detected = any(_looks_merged(detail.get(k, "")) for k in scalar_label_map)
+            # Fallback when detail HTML is flattened/label-heavy and table extraction
+            # yields sparse fields. Re-split values directly from flat text.
+            populated_scalar_count = sum(1 for k in scalar_label_map if detail.get(k))
+            if merged_detected or populated_scalar_count <= 2:
+                for key, label in scalar_label_map.items():
+                    extracted = _extract_from_flat_text(flat_text, label, all_labels)
+                    if extracted:
+                        detail[key] = extracted
+
+            # Under_Acts often appears only in flattened payloads.
+            if not detail.get("Under_Acts"):
+                ua = _extract_from_flat_text(
+                    flat_text,
+                    "Under Act(s)",
+                    all_labels + ["Under Section(s)", "FIR Details", "Case History", "Processes"],
+                )
+                if ua:
+                    detail["Under_Acts"] = ua
+
+            # Optional fields should remain empty when not explicitly present.
+            # Avoid backfilling e-filing fields from filing fields.
+            if detail.get("eFiling_Number") and detail.get("eFiling_Number") == detail.get("Filing_Number"):
+                detail.pop("eFiling_Number", None)
+            if detail.get("eFiling_Date") and detail.get("eFiling_Date") == detail.get("Filing_Date"):
+                detail.pop("eFiling_Date", None)
+            if detail.get("Decision_Date"):
+                decision = _normalize_decision_date(detail["Decision_Date"])
+                if decision:
+                    detail["Decision_Date"] = decision
+                else:
+                    detail.pop("Decision_Date", None)
+
+            # Normalize placeholder values to empty/missing.
+            placeholders = {"-", "--", "na", "n/a", "not available", "nil", "null"}
+            for k, v in list(detail.items()):
+                if isinstance(v, str) and v.strip().lower() in placeholders:
+                    detail.pop(k, None)
 
             # Petitioner / Respondent
             pet_ul = soup.select_one("ul.petitioner-advocate-list")
@@ -915,6 +1023,34 @@ class ECourtsScraper:
             logger.warning("No data to export.")
             return
         df = pd.DataFrame(data)
+        expected_cols = [
+            "Sr No",
+            "Case Type/Case Number/Case Year",
+            "Petitioner Name versus Respondent Name",
+            "CNR_Number",
+            "Case_Type",
+            "Filing_Number",
+            "Filing_Date",
+            "Registration_Number",
+            "Registration_Date",
+            "eFiling_Number",
+            "eFiling_Date",
+            "Under_Acts",
+            "First_Hearing_Date",
+            "Next_Hearing_Date",
+            "Case_Stage",
+            "Decision_Date",
+            "Case_Status",
+            "Nature_of_Disposal",
+            "Court_Number_Judge",
+            "Petitioner_and_Advocate",
+            "Respondent_and_Advocate",
+            "Search_Year",
+        ]
+        for col in expected_cols:
+            if col not in df.columns:
+                df[col] = ""
+        df = df[expected_cols + [c for c in df.columns if c not in expected_cols]]
         df.to_csv(filename, index=False, encoding="utf-8-sig")
         logger.info(f"Data exported to {filename} ({len(data)} records)")
 
