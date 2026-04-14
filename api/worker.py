@@ -26,6 +26,7 @@ _OVERHEAD_PER_YEAR_SECS = 8     # was 60: just captcha GET + search POST
 _SECS_PER_RECORD = 10           # was 15: detail POST (~2s) + rate-limit delay (~8s)
 _DEFAULT_RECORD_ESTIMATE = 10   # assumed record count for first year (no history yet)
 _MIN_YEAR_TIMEOUT_SECS = 30     # was 120: floor — HTTP is much faster than browser
+_YEAR_TIMEOUT_RETRIES = 1       # retry a timed-out year once with bigger budget
 
 # Hard override: set SCRAPE_TIMEOUT_SECONDS in .env to cap every year's budget.
 _TIMEOUT_OVERRIDE = os.getenv("SCRAPE_TIMEOUT_SECONDS")
@@ -143,46 +144,61 @@ async def run_scrape_job(job_id: str) -> None:
                 job.progress_message = progress_msg
                 await db.commit()
 
-            try:
-                async with asyncio.timeout(year_timeout):
-                    # Re-navigate for every year after the first
-                    if i > 0:
-                        await scraper.navigate_and_select()
-                        await asyncio.sleep(random_delay())
+            records = []
+            year_completed = False
+            for attempt in range(_YEAR_TIMEOUT_RETRIES + 1):
+                timeout_budget = year_timeout if attempt == 0 else int(year_timeout * 1.5)
+                if attempt > 0:
+                    logger.warning(
+                        f"Retrying year {year} after timeout "
+                        f"({attempt}/{_YEAR_TIMEOUT_RETRIES}) with {timeout_budget}s budget."
+                    )
+                try:
+                    async with asyncio.timeout(timeout_budget):
+                        # Re-navigate for every year after the first
+                        if i > 0:
+                            await scraper.navigate_and_select()
+                            await asyncio.sleep(random_delay())
 
-                    records = await scraper.search_petitioner(job.petitioner_name, year)
+                        records = await scraper.search_petitioner(job.petitioner_name, year)
+                    year_completed = True
+                    break
+                except TimeoutError:
+                    if attempt < _YEAR_TIMEOUT_RETRIES:
+                        continue
+                    mins, secs = timeout_budget // 60, timeout_budget % 60
+                    msg = (
+                        f"Year {year} timed out after {mins}m {secs}s "
+                        f"(estimated {est_records} records). "
+                        "The site may be slow or unresponsive."
+                    )
+                    logger.error(msg)
+                    async with AsyncSessionLocal() as db:
+                        result = await db.execute(select(SearchJob).where(SearchJob.id == job_id))
+                        job = result.scalar_one_or_none()
+                        if job:
+                            job.status = "failed"
+                            job.error_message = msg
+                            job.finished_at = _now()
+                            await db.commit()
+                    return  # exit run_scrape_job; finally still runs scraper.close()
+                except RuntimeError as e:
+                    # Captcha exhausted or hard scraper error — fail the job immediately
+                    msg = str(e)
+                    logger.error(f"Job {job_id} failed on year {year}: {msg}")
+                    async with AsyncSessionLocal() as db:
+                        result = await db.execute(select(SearchJob).where(SearchJob.id == job_id))
+                        job = result.scalar_one_or_none()
+                        if job:
+                            job.status = "failed"
+                            job.error_message = msg
+                            job.finished_at = _now()
+                            await db.commit()
+                    return
 
-            except RuntimeError as e:
-                # Captcha exhausted or hard scraper error — fail the job immediately
-                msg = str(e)
-                logger.error(f"Job {job_id} failed on year {year}: {msg}")
-                async with AsyncSessionLocal() as db:
-                    result = await db.execute(select(SearchJob).where(SearchJob.id == job_id))
-                    job = result.scalar_one_or_none()
-                    if job:
-                        job.status = "failed"
-                        job.error_message = msg
-                        job.finished_at = _now()
-                        await db.commit()
+            if not year_completed:
+                # Defensive safety; normal timeout path returns above.
                 return
-
-            except TimeoutError:
-                mins, secs = year_timeout // 60, year_timeout % 60
-                msg = (
-                    f"Year {year} timed out after {mins}m {secs}s "
-                    f"(estimated {est_records} records). "
-                    "The site may be slow or unresponsive."
-                )
-                logger.error(msg)
-                async with AsyncSessionLocal() as db:
-                    result = await db.execute(select(SearchJob).where(SearchJob.id == job_id))
-                    job = result.scalar_one_or_none()
-                    if job:
-                        job.status = "failed"
-                        job.error_message = msg
-                        job.finished_at = _now()
-                        await db.commit()
-                return  # exit run_scrape_job; finally still runs scraper.close()
 
             # Tag each record with the year and persist to DB
             if records:
