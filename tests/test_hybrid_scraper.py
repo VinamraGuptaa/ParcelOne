@@ -937,3 +937,15 @@ class TestHTTPConstants:
     def test_all_urls_use_https(self):
         for url in (_SEARCH_URL, _VIEW_HISTORY_URL, _CAPTCHA_URL):
             assert url.startswith("https://")
+
+
+class TestUnwrapAjaxHtml:
+    def test_unwrap_ajax_html_extracts_case_history_from_jsonish_payload(self):
+        raw = (
+            '{"case_history":"<div><h3>Petitioner and Advocate<\\/h3>'
+            '\\n<ul><li>1) Test Person<\\/li><\\/ul><\\/div>",'
+            '"status":1,"search_by":"CSpartyName"}'
+        )
+        html = HybridECourtsScraper._unwrap_ajax_html(raw)
+        assert "Petitioner and Advocate" in html
+        assert "<\\/h3>" not in html

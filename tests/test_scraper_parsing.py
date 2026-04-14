@@ -173,6 +173,15 @@ DETAIL_CNR_BOLD_HTML = """
 </body></html>
 """
 
+DETAIL_ESCAPED_FRAGMENT_HTML = r"""
+<html><body>
+<table>
+  <tr><td>Case Type</td><td>R.C.A. - Regular Civil Appeal</td></tr>
+  <tr><td>Petitioner and Advocate</td><td>\n\t\t1) Sham Tuljaram Pardeshi Advocate- Abhyankar Vidyanand Anand <\/li><\/ul><h3>Respondent and Advocate<\/h3>\n\t\t1) Shaikh Ibrahim Ahmed<\/li><\/ul><h3>Acts<\/h3><\/td></tr>
+</table>
+</body></html>
+"""
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -403,6 +412,14 @@ class TestParseDetailPage:
         scraper.page = mock_page
         detail = await scraper._parse_detail_page()
         assert isinstance(detail, dict)
+
+    async def test_escaped_html_fragment_is_cleaned(self):
+        scraper = _scraper_with_html(DETAIL_ESCAPED_FRAGMENT_HTML)
+        detail = await scraper._parse_detail_page()
+        assert "Sham Tuljaram Pardeshi" in detail["Petitioner_and_Advocate"]
+        assert "Respondent and Advocate" not in detail["Petitioner_and_Advocate"]
+        assert "\\n" not in detail["Petitioner_and_Advocate"]
+        assert "<\\/li>" not in detail["Petitioner_and_Advocate"]
 
 
 # ── _get_available_years ──────────────────────────────────────────────────────

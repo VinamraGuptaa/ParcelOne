@@ -10,6 +10,7 @@ Public API is identical; all methods are now async.
 
 import asyncio
 import dataclasses
+import html as _html
 import json as _json
 import logging
 import os
@@ -643,13 +644,54 @@ class ECourtsScraper:
                 html = await self.page.content()
             soup = BeautifulSoup(html, "html.parser")
 
+            def _normalize_fragment(text: str) -> str:
+                """Normalize escaped HTML/text fragments returned by AJAX payloads."""
+                if not text:
+                    return ""
+                cleaned = (
+                    text.replace("\\/", "/")
+                    .replace("\\\\n", "\n")
+                    .replace("\\\\t", " ")
+                    .replace("\\\\r", " ")
+                    .replace("\\n", "\n")
+                    .replace("\\t", " ")
+                    .replace("\\r", " ")
+                )
+                cleaned = _html.unescape(cleaned).strip()
+                if "<" in cleaned and ">" in cleaned:
+                    cleaned = BeautifulSoup(cleaned, "html.parser").get_text(
+                        separator="\n", strip=True
+                    )
+                lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+                return "\n".join(lines)
+
+            def _clean_party_block(text: str, section: str) -> str:
+                """Trim noisy tail sections from party/advocate blocks."""
+                if not text:
+                    return ""
+                cleaned = text
+                respondent_marker = "Respondent and Advocate"
+                tail_markers = ("Acts", "Under Act(s)", "FIR Details", "Case History", "Processes")
+
+                if section == "petitioner":
+                    if respondent_marker in cleaned:
+                        cleaned = cleaned.split(respondent_marker, 1)[0]
+                else:
+                    if respondent_marker in cleaned:
+                        cleaned = cleaned.split(respondent_marker, 1)[1]
+
+                for marker in tail_markers:
+                    if marker in cleaned:
+                        cleaned = cleaned.split(marker, 1)[0]
+                return cleaned.strip()
+
             def get_field(label_text: str) -> str:
                 """Find td/th with exact text; return text of the next sibling td."""
                 for tag in soup.find_all(["td", "th"]):
                     if tag.get_text(strip=True) == label_text:
                         sibling = tag.find_next_sibling("td")
                         if sibling:
-                            return sibling.get_text(strip=True)
+                            return _normalize_fragment(sibling.decode_contents())
                 return ""
 
             detail["Case_Type"] = get_field("Case Type")
@@ -695,15 +737,31 @@ class ECourtsScraper:
             # Petitioner / Respondent
             pet_ul = soup.select_one("ul.petitioner-advocate-list")
             if pet_ul:
-                detail["Petitioner_and_Advocate"] = pet_ul.get_text(
-                    separator="\n", strip=True
+                detail["Petitioner_and_Advocate"] = _clean_party_block(
+                    _normalize_fragment(pet_ul.decode_contents()),
+                    section="petitioner",
                 )
+            else:
+                pet_from_field = get_field("Petitioner and Advocate")
+                if pet_from_field:
+                    detail["Petitioner_and_Advocate"] = _clean_party_block(
+                        pet_from_field,
+                        section="petitioner",
+                    )
 
             res_ul = soup.select_one("ul.respondent-advocate-list")
             if res_ul:
-                detail["Respondent_and_Advocate"] = res_ul.get_text(
-                    separator="\n", strip=True
+                detail["Respondent_and_Advocate"] = _clean_party_block(
+                    _normalize_fragment(res_ul.decode_contents()),
+                    section="respondent",
                 )
+            else:
+                res_from_field = get_field("Respondent and Advocate")
+                if res_from_field:
+                    detail["Respondent_and_Advocate"] = _clean_party_block(
+                        res_from_field,
+                        section="respondent",
+                    )
 
             # Drop empty fields
             detail = {k: v for k, v in detail.items() if v}
@@ -986,7 +1044,22 @@ class HybridECourtsScraper(ECourtsScraper):
                     if key in data and isinstance(data[key], str):
                         return data[key]
         except Exception:
-            pass
+            # Some responses are almost-JSON strings that fail strict parsing.
+            # Best-effort extract the key payload and decode escapes.
+            for key in ("party_data", "case_history", "tab_data", "html", "data"):
+                m = _re.search(rf'"{key}"\s*:\s*"((?:\\.|[^"\\])*)"', raw)
+                if m:
+                    payload = m.group(1)
+                    try:
+                        return _json.loads(f'"{payload}"')
+                    except Exception:
+                        cleaned = (
+                            payload.replace("\\/", "/")
+                            .replace("\\n", "\n")
+                            .replace("\\t", " ")
+                            .replace("\\r", " ")
+                        )
+                        return _html.unescape(cleaned)
         return raw
 
     # ── HTTP captcha solve ─────────────────────────────────────────────────
