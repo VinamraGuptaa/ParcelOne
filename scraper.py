@@ -46,6 +46,7 @@ MAX_DELAY_SECONDS = 7
 MAX_CAPTCHA_RETRIES = 5
 DEBUG_ARTIFACTS = os.getenv("SCRAPER_DEBUG_ARTIFACTS", "") == "1"
 HTTP_TIMEOUT_SECONDS = 45.0
+CAPTCHA_FETCH_RETRIES = 3
 
 # ── Hybrid HTTP endpoints (confirmed via live site inspection) ────────────────
 # Pune District Court — values taken directly from the live page's form fields
@@ -1242,47 +1243,59 @@ class HybridECourtsScraper(ECourtsScraper):
         import captcha_solver
 
         captcha_path = "/tmp/ecourts_http_captcha.png"
-        try:
-            # Step 1: trigger captcha generation, get the exact image URL
-            cap_resp = await client.post(
-                _GET_CAPTCHA_URL,
-                data={"ajax_req": "true", "app_token": ""},
-            )
-            logger.info(
-                f"[Hybrid] getCaptcha: {cap_resp.status_code} "
-                f"{len(cap_resp.text)} bytes"
-            )
-
-            # Parse the JSON response to extract the captcha image src
-            captcha_url = None
+        for fetch_attempt in range(1, CAPTCHA_FETCH_RETRIES + 1):
             try:
-                data = _json.loads(cap_resp.text)
-                div_html = data.get("div_captcha", "")
-                # src is JSON-escaped: src=\"\/ecourtindia_v6\/vendor\/...\"
-                m = _re.search(r'src=["\']([^"\']*securimage[^"\']*)["\']', div_html)
-                if m:
-                    raw_path = m.group(1).replace("\\/", "/")
-                    captcha_url = f"https://services.ecourts.gov.in{raw_path}"
-                    logger.info(f"[Hybrid] Captcha URL from getCaptcha: {captcha_url}")
-            except Exception as parse_err:
-                logger.warning(f"[Hybrid] Could not parse getCaptcha JSON: {parse_err}")
+                # Step 1: trigger captcha generation, get the exact image URL
+                cap_resp = await client.post(
+                    _GET_CAPTCHA_URL,
+                    data={"ajax_req": "true", "app_token": ""},
+                )
+                logger.info(
+                    f"[Hybrid] getCaptcha: {cap_resp.status_code} "
+                    f"{len(cap_resp.text)} bytes"
+                )
 
-            # Fallback: use the default securimage URL if parsing failed
-            if not captcha_url:
-                captcha_url = f"{_CAPTCHA_URL}?t={int(time.monotonic() * 1000)}"
-                logger.warning("[Hybrid] Falling back to default captcha URL")
+                # Parse the JSON response to extract the captcha image src
+                captcha_url = None
+                try:
+                    data = _json.loads(cap_resp.text)
+                    div_html = data.get("div_captcha", "")
+                    # src is JSON-escaped: src=\"\/ecourtindia_v6\/vendor\/...\"
+                    m = _re.search(r'src=["\']([^"\']*securimage[^"\']*)["\']', div_html)
+                    if m:
+                        raw_path = m.group(1).replace("\\/", "/")
+                        captcha_url = f"https://services.ecourts.gov.in{raw_path}"
+                        logger.info(f"[Hybrid] Captcha URL from getCaptcha: {captcha_url}")
+                except Exception as parse_err:
+                    logger.warning(f"[Hybrid] Could not parse getCaptcha JSON: {parse_err}")
 
-            # Step 2: download the exact captcha image the server generated
-            resp = await client.get(captcha_url)
-            resp.raise_for_status()
-            with open(captcha_path, "wb") as fh:
-                fh.write(resp.content)
-            solved = captcha_solver.solve(captcha_path)
-            logger.info(f"[Hybrid] HTTP captcha solved: '{solved}'")
-            return solved or None
-        except Exception as e:
-            logger.error(f"[Hybrid] HTTP captcha fetch failed: {e}")
-            return None
+                # Fallback: use the default securimage URL if parsing failed
+                if not captcha_url:
+                    captcha_url = f"{_CAPTCHA_URL}?t={int(time.monotonic() * 1000)}"
+                    logger.warning("[Hybrid] Falling back to default captcha URL")
+
+                # Step 2: download the exact captcha image the server generated
+                resp = await client.get(captcha_url)
+                resp.raise_for_status()
+                with open(captcha_path, "wb") as fh:
+                    fh.write(resp.content)
+                solved = captcha_solver.solve(captcha_path)
+                logger.info(f"[Hybrid] HTTP captcha solved: '{solved}'")
+                return solved or None
+            except (httpx.RequestError, httpx.TimeoutException) as e:
+                logger.warning(
+                    f"[Hybrid] HTTP captcha fetch transient error "
+                    f"({fetch_attempt}/{CAPTCHA_FETCH_RETRIES}): {e}"
+                )
+                if fetch_attempt < CAPTCHA_FETCH_RETRIES:
+                    await asyncio.sleep(min(2 * fetch_attempt, 5))
+                    continue
+                logger.error(f"[Hybrid] HTTP captcha fetch failed after retries: {e}")
+                return None
+            except Exception as e:
+                logger.error(f"[Hybrid] HTTP captcha fetch failed: {e}")
+                return None
+        return None
 
     # ── Core HTTP search ───────────────────────────────────────────────────
 

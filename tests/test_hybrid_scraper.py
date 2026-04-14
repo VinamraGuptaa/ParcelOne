@@ -384,6 +384,24 @@ class TestFetchCaptchaHTTP:
             await scraper._fetch_captcha_http(client)
         get_resp.raise_for_status.assert_called_once()
 
+    async def test_retries_transient_get_error_then_succeeds(self):
+        scraper = HybridECourtsScraper(headless=True)
+        scraper._session = ScrapingSession(services_sessid="x")
+
+        get_captcha_json = '{"div_captcha":"<img src=\\"/ecourtindia_v6/vendor/securimage/securimage_show.php?abc123\\">"}'
+        get_captcha_resp = _make_http_response(text=get_captcha_json)
+        get_image_resp = _make_http_response(content=b"PNG")
+
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.post = AsyncMock(return_value=get_captcha_resp)
+        client.get = AsyncMock(side_effect=[httpx.ReadError("disconnect"), get_image_resp])
+
+        with patch("captcha_solver.solve", return_value="ABCD"):
+            result = await scraper._fetch_captcha_http(client)
+
+        assert result == "ABCD"
+        assert client.get.call_count == 2
+
 
 # ── _http_search_year ─────────────────────────────────────────────────────────
 
