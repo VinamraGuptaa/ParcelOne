@@ -4,8 +4,8 @@ Entry point: python server.py
 Reads PORT from environment (Render injects this automatically).
 """
 
-import os
 import logging
+import os
 
 from dotenv import load_dotenv
 
@@ -16,9 +16,9 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
-from api.app import create_app  # noqa: E402 — import after dotenv loaded
-
 import uvicorn  # noqa: E402
+
+from api.app import create_app  # noqa: E402 — import after dotenv loaded
 
 app = create_app()
 

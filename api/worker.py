@@ -20,11 +20,12 @@ from api.models import SearchJob, Case
 # How many completed jobs to retain; older ones (+ their cases) are deleted.
 MAX_JOBS_RETAINED = int(os.getenv("MAX_JOBS", "10"))
 
-# Per-year timeout tuning knobs
-_OVERHEAD_PER_YEAR_SECS = 60    # navigation + CAPTCHA + rate-limit delays
-_SECS_PER_RECORD = 15           # detail fetch (~3s) + rate-limit delay (~8s) + buffer
+# Per-year timeout tuning knobs — recalibrated for HybridECourtsScraper
+# (no browser re-navigation; captcha solved via HTTP ~0.5s; search POST ~2s)
+_OVERHEAD_PER_YEAR_SECS = 8     # was 60: just captcha GET + search POST
+_SECS_PER_RECORD = 10           # was 15: detail POST (~2s) + rate-limit delay (~8s)
 _DEFAULT_RECORD_ESTIMATE = 10   # assumed record count for first year (no history yet)
-_MIN_YEAR_TIMEOUT_SECS = 120    # floor — even a 0-record year needs time for navigation
+_MIN_YEAR_TIMEOUT_SECS = 30     # was 120: floor — HTTP is much faster than browser
 
 # Hard override: set SCRAPE_TIMEOUT_SECONDS in .env to cap every year's budget.
 _TIMEOUT_OVERRIDE = os.getenv("SCRAPE_TIMEOUT_SECONDS")
@@ -76,10 +77,10 @@ async def run_scrape_job(job_id: str) -> None:
     logger.info(f"==> Worker task started for job {job_id}")
 
     # Import here to avoid circular imports at module load time
-    from scraper import ECourtsScraper
+    from scraper import HybridECourtsScraper
 
-    scraper = ECourtsScraper(headless=True)
-    logger.info(f"ECourtsScraper instantiated (headless=True)")
+    scraper = HybridECourtsScraper(headless=True)
+    logger.info(f"HybridECourtsScraper instantiated (headless=True)")
 
     async with AsyncSessionLocal() as db:
         # Load the job

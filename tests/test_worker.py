@@ -98,7 +98,7 @@ class TestRunScrapeJob:
         scraper_mock = _make_scraper_mock()
 
         with patch("api.worker.AsyncSessionLocal", session_factory), \
-             patch("scraper.ECourtsScraper", return_value=scraper_mock):
+             patch("scraper.HybridECourtsScraper", return_value=scraper_mock):
             from api.worker import run_scrape_job
             # Should not raise
             await run_scrape_job("non-existent-uuid")
@@ -112,7 +112,7 @@ class TestRunScrapeJob:
         scraper_mock = _make_scraper_mock(records=[])
 
         with patch("api.worker.AsyncSessionLocal", session_factory), \
-             patch("scraper.ECourtsScraper", return_value=scraper_mock):
+             patch("scraper.HybridECourtsScraper", return_value=scraper_mock):
             from api.worker import run_scrape_job
             await run_scrape_job(job.id)
 
@@ -126,7 +126,7 @@ class TestRunScrapeJob:
         scraper_mock = _make_scraper_mock(records=[])
 
         with patch("api.worker.AsyncSessionLocal", session_factory), \
-             patch("scraper.ECourtsScraper", return_value=scraper_mock):
+             patch("scraper.HybridECourtsScraper", return_value=scraper_mock):
             from api.worker import run_scrape_job
             await run_scrape_job(job.id)
 
@@ -143,7 +143,7 @@ class TestRunScrapeJob:
         scraper_mock.setup_driver = AsyncMock(side_effect=RuntimeError("browser crashed"))
 
         with patch("api.worker.AsyncSessionLocal", session_factory), \
-             patch("scraper.ECourtsScraper", return_value=scraper_mock):
+             patch("scraper.HybridECourtsScraper", return_value=scraper_mock):
             from api.worker import run_scrape_job
             await run_scrape_job(job.id)
 
@@ -158,7 +158,7 @@ class TestRunScrapeJob:
         scraper_mock = _make_scraper_mock(records=SAMPLE_RECORDS)
 
         with patch("api.worker.AsyncSessionLocal", session_factory), \
-             patch("scraper.ECourtsScraper", return_value=scraper_mock):
+             patch("scraper.HybridECourtsScraper", return_value=scraper_mock):
             from api.worker import run_scrape_job
             await run_scrape_job(job.id)
 
@@ -172,7 +172,7 @@ class TestRunScrapeJob:
         scraper_mock = _make_scraper_mock(records=SAMPLE_RECORDS)
 
         with patch("api.worker.AsyncSessionLocal", session_factory), \
-             patch("scraper.ECourtsScraper", return_value=scraper_mock):
+             patch("scraper.HybridECourtsScraper", return_value=scraper_mock):
             from api.worker import run_scrape_job
             await run_scrape_job(job.id)
 
@@ -186,7 +186,7 @@ class TestRunScrapeJob:
         scraper_mock = _make_scraper_mock(records=SAMPLE_RECORDS)
 
         with patch("api.worker.AsyncSessionLocal", session_factory), \
-             patch("scraper.ECourtsScraper", return_value=scraper_mock):
+             patch("scraper.HybridECourtsScraper", return_value=scraper_mock):
             from api.worker import run_scrape_job
             await run_scrape_job(job.id)
 
@@ -201,7 +201,7 @@ class TestRunScrapeJob:
         scraper_mock = _make_scraper_mock(records=SAMPLE_RECORDS)
 
         with patch("api.worker.AsyncSessionLocal", session_factory), \
-             patch("scraper.ECourtsScraper", return_value=scraper_mock):
+             patch("scraper.HybridECourtsScraper", return_value=scraper_mock):
             from api.worker import run_scrape_job
             await run_scrape_job(job.id)
 
@@ -219,7 +219,7 @@ class TestRunScrapeJob:
         scraper_mock.navigate_and_select = AsyncMock(side_effect=Exception("nav error"))
 
         with patch("api.worker.AsyncSessionLocal", session_factory), \
-             patch("scraper.ECourtsScraper", return_value=scraper_mock):
+             patch("scraper.HybridECourtsScraper", return_value=scraper_mock):
             from api.worker import run_scrape_job
             await run_scrape_job(job.id)
 
@@ -232,7 +232,7 @@ class TestRunScrapeJob:
         scraper_mock = _make_scraper_mock(records=[])
 
         with patch("api.worker.AsyncSessionLocal", session_factory), \
-             patch("scraper.ECourtsScraper", return_value=scraper_mock):
+             patch("scraper.HybridECourtsScraper", return_value=scraper_mock):
             from api.worker import run_scrape_job
             await run_scrape_job(job.id)
 
@@ -247,7 +247,7 @@ class TestRunScrapeJob:
         scraper_mock = _make_scraper_mock(records=[])
 
         with patch("api.worker.AsyncSessionLocal", session_factory), \
-             patch("scraper.ECourtsScraper", return_value=scraper_mock):
+             patch("scraper.HybridECourtsScraper", return_value=scraper_mock):
             from api.worker import run_scrape_job
             await run_scrape_job(job.id)
 
@@ -262,7 +262,7 @@ class TestRunScrapeJob:
         scraper_mock = _make_scraper_mock(records=SAMPLE_RECORDS[:1])
 
         with patch("api.worker.AsyncSessionLocal", session_factory), \
-             patch("scraper.ECourtsScraper", return_value=scraper_mock):
+             patch("scraper.HybridECourtsScraper", return_value=scraper_mock):
             from api.worker import run_scrape_job
             await run_scrape_job(job.id)
 

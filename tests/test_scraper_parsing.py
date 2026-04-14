@@ -426,15 +426,17 @@ class TestGetAvailableYears:
         as_ints = [int(y) for y in years]
         assert as_ints == sorted(as_ints, reverse=True)
 
-    def test_goes_back_to_2000(self):
+    def test_goes_back_15_years(self):
+        import datetime
         scraper = ECourtsScraper()
         years = scraper._get_available_years()
-        assert "2000" in years
+        oldest_expected = str(datetime.datetime.now().year - 14)
+        assert oldest_expected in years
 
-    def test_does_not_include_1999(self):
+    def test_has_exactly_15_years(self):
         scraper = ECourtsScraper()
         years = scraper._get_available_years()
-        assert "1999" not in years
+        assert len(years) == 15
 
 
 # ── export_to_csv ─────────────────────────────────────────────────────────────

@@ -15,20 +15,30 @@ import argparse
 import asyncio
 import sys
 
-from scraper import ECourtsScraper
+from scraper import ECourtsScraper, HybridECourtsScraper
 
 
 async def _run(args):
-    scraper = ECourtsScraper(headless=args.headless)
+    if args.dump_network:
+        scraper = ECourtsScraper(headless=args.headless)
+    else:
+        scraper = HybridECourtsScraper(headless=args.headless)
     try:
-        print("\n[1/4] Setting up browser...")
+        print("\n[1/4] Setting up scraper...")
         await scraper.setup_driver()
 
-        print("[2/4] Navigating to eCourts and selecting court...")
-        await scraper.navigate_and_select()
+        if args.dump_network:
+            print("[2/4] Navigating to eCourts and selecting court...")
+            await scraper.navigate_and_select()
 
         print(f"[3/4] Searching for '{args.petitioner_name}'...")
-        if args.year:
+        if args.dump_network:
+            year = args.year or str(__import__("datetime").datetime.now().year)
+            print(f"[Phase0] Running network dump for year {year}...")
+            await scraper._dump_network(args.petitioner_name, year)
+            print("[Phase0] Done. See /tmp/ecourts_net.json")
+            return
+        elif args.year:
             results = await scraper.scrape_single_year(args.petitioner_name, args.year)
         else:
             results = await scraper.scrape_all_years(args.petitioner_name)
@@ -59,7 +69,8 @@ async def _run(args):
     except KeyboardInterrupt:
         print("\n\n  Scraping interrupted by user.")
     except Exception as e:
-        print(f"\n Error: {e}")
+        error_text = str(e).strip() or f"{type(e).__name__}: {e!r}"
+        print(f"\n Error: {error_text}")
         import traceback
         traceback.print_exc()
     finally:
@@ -97,6 +108,11 @@ def main():
         action="store_true",
         help="Run browser in headless mode (no visible window)",
     )
+    parser.add_argument(
+        "--dump-network",
+        action="store_true",
+        help="Phase 0: intercept POST requests and dump to /tmp/ecourts_net.json (dev only)",
+    )
 
     args = parser.parse_args()
 
@@ -108,7 +124,7 @@ def main():
     print("eCourts India Case Scraper")
     print("=" * 60)
     print(f"  Petitioner Name : {args.petitioner_name}")
-    print(f"  Year            : {args.year or 'Last 10 years'}")
+    print(f"  Year            : {args.year or 'Last 15 years'}")
     print(f"  Output File     : {args.output}")
     print(f"  Headless        : {args.headless}")
     print("  State           : Maharashtra")

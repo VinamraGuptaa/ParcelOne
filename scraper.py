@@ -9,14 +9,19 @@ Public API is identical; all methods are now async.
 """
 
 import asyncio
+import dataclasses
+import json as _json
+import logging
 import os
 import random
-import logging
+import re as _re
+import time
 from typing import Optional
 
-from playwright.async_api import async_playwright, Page, BrowserContext, Browser
-from bs4 import BeautifulSoup
+import httpx
 import pandas as pd
+from bs4 import BeautifulSoup
+from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 # captcha_solver is imported lazily inside solve_captcha() to defer torch
 # loading until after Chromium is already running (saves ~400MB at launch time)
@@ -27,7 +32,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://services.ecourts.gov.in/ecourtindia_v6/?p=casestatus/index&app_token="
+BASE_URL = (
+    "https://services.ecourts.gov.in/ecourtindia_v6/?p=casestatus/index&app_token="
+)
 
 STATE_TEXT = "Maharashtra"
 DISTRICT_TEXT = "Pune"
@@ -36,6 +43,49 @@ COURT_COMPLEX_TEXT = "Pune, District and Sessions Court"
 MIN_DELAY_SECONDS = 3
 MAX_DELAY_SECONDS = 7
 MAX_CAPTCHA_RETRIES = 5
+DEBUG_ARTIFACTS = os.getenv("SCRAPER_DEBUG_ARTIFACTS", "") == "1"
+HTTP_TIMEOUT_SECONDS = 45.0
+
+# ── Hybrid HTTP endpoints (confirmed via live site inspection) ────────────────
+# Pune District Court — values taken directly from the live page's form fields
+_STATE_CODE = "1"
+_DIST_CODE = "25"
+_COURT_COMPLEX_CODE = "1010303@1,2,3,22,23@N"  # full select value (not just the code)
+_COURT_COMPLEX_BARE = "1010303"  # bare code used in some fields
+
+_BASE = "https://services.ecourts.gov.in/ecourtindia_v6"
+_SEARCH_URL = f"{_BASE}/?p=casestatus/submitPartyName"
+_GET_CAPTCHA_URL = (
+    f"{_BASE}/?p=casestatus/getCaptcha"  # must POST before fetching image
+)
+_VIEW_HISTORY_URL = f"{_BASE}/?p=home/viewHistory"
+_CAPTCHA_URL = f"{_BASE}/vendor/securimage/securimage_show.php"
+
+_HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "X-Requested-With": "XMLHttpRequest",
+    "Referer": f"{_BASE}/",
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
+}
+
+
+class SessionExpiredError(Exception):
+    """Raised when the PHP session appears to have expired."""
+
+
+@dataclasses.dataclass
+class ScrapingSession:
+    """Lightweight session state shared across HTTP requests."""
+
+    services_sessid: str  # SERVICES_SESSID cookie
+    jsession: str = ""  # JSESSION cookie
+    app_token: str = ""  # hidden app_token field in the form
+    created_at: float = dataclasses.field(default_factory=time.monotonic)
 
 
 class ECourtsScraper:
@@ -55,8 +105,13 @@ class ECourtsScraper:
     async def setup_driver(self):
         """Launch Playwright Chromium browser and create a page."""
         import time
-        browsers_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "~/.cache/ms-playwright")
-        logger.info(f"Launching Playwright Chromium (headless={self.headless}, browsers_path={browsers_path})...")
+
+        browsers_path = os.environ.get(
+            "PLAYWRIGHT_BROWSERS_PATH", "~/.cache/ms-playwright"
+        )
+        logger.info(
+            f"Launching Playwright Chromium (headless={self.headless}, browsers_path={browsers_path})..."
+        )
         t0 = time.monotonic()
         self._playwright = await async_playwright().start()
         self.browser = await self._playwright.chromium.launch(
@@ -104,7 +159,8 @@ class ECourtsScraper:
         Also selects 'Both' for case status (Pending + Disposed).
         """
         import time
-        logger.info(f"Navigating to eCourts portal...")
+
+        logger.info("Navigating to eCourts portal...")
         t0 = time.monotonic()
         await self.page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30000)
         logger.info(f"Page loaded in {time.monotonic() - t0:.1f}s.")
@@ -125,7 +181,9 @@ class ECourtsScraper:
         logger.info("District selected. Waiting for court complex dropdown...")
 
         await asyncio.sleep(2)
-        await self._wait_for_option_containing("#court_complex_code", COURT_COMPLEX_TEXT)
+        await self._wait_for_option_containing(
+            "#court_complex_code", COURT_COMPLEX_TEXT
+        )
 
         # Select Court Complex via partial match (resilient to label whitespace/drift)
         logger.info(f"Selecting Court Complex: {COURT_COMPLEX_TEXT}...")
@@ -153,7 +211,9 @@ class ECourtsScraper:
             await asyncio.sleep(0.5)
         logger.warning(f"Dropdown {selector} may not be fully populated.")
 
-    async def _wait_for_option_containing(self, selector: str, text: str, timeout_s: int = 15):
+    async def _wait_for_option_containing(
+        self, selector: str, text: str, timeout_s: int = 15
+    ):
         """Wait until a select element has an option whose label contains `text`."""
         deadline = asyncio.get_event_loop().time() + timeout_s
         while asyncio.get_event_loop().time() < deadline:
@@ -179,8 +239,7 @@ class ECourtsScraper:
             selector,
         )
         logger.warning(
-            f"Option containing '{text}' not found in {selector}. "
-            f"Available: {options}"
+            f"Option containing '{text}' not found in {selector}. Available: {options}"
         )
 
     async def _select_option_containing(self, selector: str, text: str):
@@ -213,6 +272,7 @@ class ECourtsScraper:
     async def solve_captcha(self) -> Optional[str]:
         """Screenshot the captcha element and solve it with EasyOCR."""
         import captcha_solver  # deferred: importing easyocr/torch here keeps RAM free at launch
+
         captcha_path = "/tmp/ecourts_captcha.png"
         try:
             captcha_img = self.page.locator("#captcha_image")
@@ -277,9 +337,7 @@ class ECourtsScraper:
 
         # Fallback: refresh image element
         try:
-            refresh_imgs = self.page.locator(
-                "img[src*='refresh'], img[alt*='refresh']"
-            )
+            refresh_imgs = self.page.locator("img[src*='refresh'], img[alt*='refresh']")
             if await refresh_imgs.count() > 0:
                 await refresh_imgs.first.evaluate("el => el.click()")
                 await asyncio.sleep(2)
@@ -315,6 +373,7 @@ class ECourtsScraper:
             List of enriched case detail dicts.
         """
         import time
+
         logger.info(f"==> Search start: petitioner='{name}' year='{year or 'all'}'")
         t0 = time.monotonic()
 
@@ -366,9 +425,7 @@ class ECourtsScraper:
 
             if not clicked:
                 logger.warning("Could not find Go button — trying JS submit")
-                await self.page.evaluate(
-                    "document.querySelector('form')?.submit()"
-                )
+                await self.page.evaluate("document.querySelector('form')?.submit()")
 
             await asyncio.sleep(3)
 
@@ -378,7 +435,9 @@ class ECourtsScraper:
                 await asyncio.sleep(1)
                 continue
 
-            logger.info(f"Captcha accepted on attempt {attempt} ({time.monotonic() - t0:.1f}s). Parsing results...")
+            logger.info(
+                f"Captcha accepted on attempt {attempt} ({time.monotonic() - t0:.1f}s). Parsing results..."
+            )
             try:
                 await self.page.screenshot(path="/tmp/ecourts_after_submit.png")
             except Exception:
@@ -411,21 +470,32 @@ class ECourtsScraper:
             if not summary_rows:
                 return []
 
-            logger.info(f"Found {len(summary_rows)} case(s) in summary table. Fetching details...")
+            logger.info(
+                f"Found {len(summary_rows)} case(s) in summary table. Fetching details..."
+            )
             enriched = []
             for idx, summary in enumerate(summary_rows):
                 import time as _time
+
                 view_js = summary.pop("_view_js", None)
-                case_ref = summary.get('Case Type/Case Number/Case Year', f'row {idx+1}')
-                logger.info(f"  [{idx+1}/{len(summary_rows)}] Fetching detail: {case_ref}")
+                case_ref = summary.get(
+                    "Case Type/Case Number/Case Year", f"row {idx + 1}"
+                )
+                logger.info(
+                    f"  [{idx + 1}/{len(summary_rows)}] Fetching detail: {case_ref}"
+                )
                 t_detail = _time.monotonic()
                 detail = await self._fetch_detail_by_onclick(view_js) if view_js else {}
-                logger.info(f"  [{idx+1}/{len(summary_rows)}] Detail fetched in {_time.monotonic() - t_detail:.1f}s ({len(detail)} fields)")
+                logger.info(
+                    f"  [{idx + 1}/{len(summary_rows)}] Detail fetched in {_time.monotonic() - t_detail:.1f}s ({len(detail)} fields)"
+                )
                 merged = {**summary, **detail} if detail else summary
                 enriched.append(merged)
                 await self._rate_limit_delay()
 
-            logger.info(f"==> All details fetched: {len(enriched)} case record(s) complete.")
+            logger.info(
+                f"==> All details fetched: {len(enriched)} case record(s) complete."
+            )
             return enriched
 
         except Exception as e:
@@ -439,7 +509,7 @@ class ECourtsScraper:
                 pass
             return []
 
-    async def _parse_summary_table(self) -> list[dict]:
+    async def _parse_summary_table(self, html: str | None = None) -> list[dict]:
         """
         Parse the #dispTable results table.
 
@@ -451,15 +521,19 @@ class ECourtsScraper:
 
         Returns dicts with proper column names; View column replaced by "_view_js"
         containing the raw onclick JS string for direct evaluation.
+
+        Args:
+            html: Pre-fetched HTML string. If None, reads from the live browser page.
         """
-        html = await self.page.content()
+        if html is None:
+            html = await self.page.content()
         soup = BeautifulSoup(html, "html.parser")
         results = []
 
         # Check for "no records" message before attempting table parse
         no_record = soup.find(
-            string=lambda t: t and (
-                "no record" in t.lower() or "no records" in t.lower()
+            string=lambda t: (
+                t and ("no record" in t.lower() or "no records" in t.lower())
             )
         )
         if no_record:
@@ -551,7 +625,7 @@ class ECourtsScraper:
             logger.error(f"Error fetching detail via onclick: {e}")
             return {}
 
-    async def _parse_detail_page(self) -> dict:
+    async def _parse_detail_page(self, html: str | None = None) -> dict:
         """
         Parse the case detail page using BeautifulSoup.
 
@@ -559,10 +633,14 @@ class ECourtsScraper:
         CNR Number, e-Filing Number/Date, Under Act(s), First Hearing Date,
         Decision Date, Case Status, Nature of Disposal, Court Number and Judge,
         Petitioner_and_Advocate, Respondent_and_Advocate.
+
+        Args:
+            html: Pre-fetched HTML string. If None, reads from the live browser page.
         """
         detail: dict = {}
         try:
-            html = await self.page.content()
+            if html is None:
+                html = await self.page.content()
             soup = BeautifulSoup(html, "html.parser")
 
             def get_field(label_text: str) -> str:
@@ -574,13 +652,13 @@ class ECourtsScraper:
                             return sibling.get_text(strip=True)
                 return ""
 
-            detail["Case_Type"]           = get_field("Case Type")
-            detail["Filing_Number"]       = get_field("Filing Number")
-            detail["Filing_Date"]         = get_field("Filing Date")
+            detail["Case_Type"] = get_field("Case Type")
+            detail["Filing_Number"] = get_field("Filing Number")
+            detail["Filing_Date"] = get_field("Filing Date")
             detail["Registration_Number"] = get_field("Registration Number")
-            detail["Registration_Date"]   = get_field("Registration Date")
-            detail["eFiling_Number"]      = get_field("e-Filing Number")
-            detail["eFiling_Date"]        = get_field("e-Filing Date")
+            detail["Registration_Date"] = get_field("Registration Date")
+            detail["eFiling_Number"] = get_field("e-Filing Number")
+            detail["eFiling_Date"] = get_field("e-Filing Date")
 
             # CNR Number — value is in a span.text-danger rather than the td text
             cnr_span = soup.select_one(
@@ -592,8 +670,9 @@ class ECourtsScraper:
 
             # Under Act(s) — header is a th; data rows follow
             act_th = soup.find(
-                lambda t: t.name in ("th", "td")
-                and t.get_text(strip=True) == "Under Act(s)"
+                lambda t: (
+                    t.name in ("th", "td") and t.get_text(strip=True) == "Under Act(s)"
+                )
             )
             if act_th:
                 acts = []
@@ -606,10 +685,10 @@ class ECourtsScraper:
                 detail["Under_Acts"] = " | ".join(acts)
 
             detail["First_Hearing_Date"] = get_field("First Hearing Date")
-            detail["Next_Hearing_Date"]  = get_field("Next Hearing Date")
-            detail["Case_Stage"]         = get_field("Case Stage")
-            detail["Decision_Date"]      = get_field("Decision Date")
-            detail["Case_Status"]        = get_field("Case Status")
+            detail["Next_Hearing_Date"] = get_field("Next Hearing Date")
+            detail["Case_Stage"] = get_field("Case Stage")
+            detail["Decision_Date"] = get_field("Decision Date")
+            detail["Case_Status"] = get_field("Case Status")
             detail["Nature_of_Disposal"] = get_field("Nature of Disposal")
             detail["Court_Number_Judge"] = get_field("Court Number and Judge")
 
@@ -634,6 +713,60 @@ class ECourtsScraper:
             logger.error(f"Error parsing detail page: {e}")
 
         return detail
+
+    # ------------------------------------------------------------------ #
+    #  Phase 0 — Network discovery (TEMPORARY debug helper)
+    # ------------------------------------------------------------------ #
+
+    async def _dump_network(self, name: str, year: str):
+        """
+        TEMPORARY — Phase 0 network discovery.
+
+        Intercepts every POST made during search_petitioner() and dumps the
+        request URLs, bodies, and all hidden form fields to /tmp/ecourts_net.json.
+
+        Usage (run once locally, then remove this method):
+            scraper = ECourtsScraper(headless=False)
+            await scraper.setup_driver()
+            await scraper.navigate_and_select()
+            await scraper._dump_network("Rajesh Gupta", "2017")
+        """
+        import json
+
+        captured = []
+        self.page.on(
+            "request",
+            lambda r: (
+                captured.append(
+                    {"url": r.url, "method": r.method, "post_data": r.post_data}
+                )
+                if r.method == "POST"
+                else None
+            ),
+        )
+
+        hidden = await self.page.evaluate(
+            """() => {
+                const f = document.querySelector('form');
+                const out = {};
+                if (f) f.querySelectorAll('input').forEach(i => {
+                    if (i.name || i.id) out[i.name || i.id] = i.value;
+                });
+                return out;
+            }"""
+        )
+
+        await self.search_petitioner(name, year)
+
+        out_path = "/tmp/ecourts_net.json"
+        with open(out_path, "w", encoding="utf-8") as fh:
+            json.dump({"hidden_fields": hidden, "posts": captured}, fh, indent=2)
+
+        logger.info(f"[Phase0] Network dump written to {out_path}")
+        logger.info(f"[Phase0] hidden_fields: {list(hidden.keys())}")
+        logger.info(f"[Phase0] POST requests captured: {len(captured)}")
+        for p in captured:
+            logger.info(f"  POST {p['url']!r}  body={str(p['post_data'])[:200]}")
 
     # ------------------------------------------------------------------ #
     #  Multi-year scraping
@@ -680,6 +813,7 @@ class ECourtsScraper:
 
     def _get_available_years(self) -> list[str]:
         import datetime
+
         current_year = datetime.datetime.now().year
         return [str(y) for y in range(current_year, current_year - 15, -1)]
 
@@ -701,3 +835,478 @@ class ECourtsScraper:
         df = pd.DataFrame(data)
         df.to_csv(filename, index=False, encoding="utf-8-sig")
         logger.info(f"Data exported to {filename} ({len(data)} records)")
+
+
+# ── Hybrid Browser + HTTP Scraper ────────────────────────────────────────────
+
+
+class HybridECourtsScraper(ECourtsScraper):
+    """
+    Optimised scraper: opens a browser exactly once to establish a PHP session,
+    then performs all year searches via plain httpx POST requests.
+
+    Expected gain: ~35% faster end-to-end. Chromium runs only ~10-15s (one page
+    load to get PHPSESSID) instead of 15+ minutes (15 full navigations).
+
+    Per-year flow (HTTP-only after bootstrap):
+      1. GET captcha image   → solve with RapidOCR         (~0.5s)
+      2. POST submitPartyName → parse summary HTML          (~2s)
+      3. POST viewHistory × N → parse each detail fragment  (~2s × N)
+    """
+
+    SESSION_TTL = 1200  # 20 min; PHP gc_maxlifetime default is 24 min
+
+    def __init__(self, headless: bool = True):
+        super().__init__(headless=headless)
+        self._session: Optional[ScrapingSession] = None
+        self._http: Optional[httpx.AsyncClient] = None
+
+    # ── One-time setup ─────────────────────────────────────────────────────
+
+    async def setup_driver(self):
+        """No-op: Hybrid bootstraps lazily inside scrape_all_years."""
+        pass
+
+    async def navigate_and_select(self):
+        """No-op: court selection is baked into the POST body, not navigation."""
+        pass
+
+    # ── Session bootstrap (browser, runs once per scrape) ──────────────────
+
+    async def bootstrap_session(self) -> ScrapingSession:
+        """
+        Open Chromium once to extract session cookies and hidden form fields:
+          1. navigate_and_select  (state → district → court complex AJAX)
+          2. Extract SERVICES_SESSID + JSESSION cookies from browser context
+          3. Extract app_token hidden field from the search form
+          4. Close browser
+
+        No form submission needed — captcha is fetched fresh per year via HTTP.
+        """
+        logger.info("[Hybrid] Bootstrapping session via browser...")
+        t0 = time.monotonic()
+
+        await super().setup_driver()
+        services_sessid = ""
+        jsession = ""
+        app_token = ""
+        try:
+            await super().navigate_and_select()
+
+            ctx = self.context
+            assert ctx is not None, "Browser context not initialised"
+            cookies = await ctx.cookies()
+            cookie_map = {c.get("name", ""): c.get("value", "") for c in cookies}
+            logger.info(f"[Hybrid] Cookies found: {list(cookie_map.keys())}")
+
+            services_sessid = cookie_map.get("SERVICES_SESSID", "")
+            jsession = cookie_map.get("JSESSION", "")
+
+            if not services_sessid:
+                raise RuntimeError(
+                    f"[Hybrid] SERVICES_SESSID not found. "
+                    f"Available cookies: {list(cookie_map.keys())}"
+                )
+
+            pg = self.page
+            assert pg is not None
+            app_token = await pg.evaluate(
+                "() => document.getElementById('app_token')?.value || ''"
+            )
+        finally:
+            if self.browser:
+                try:
+                    await self.browser.close()
+                except Exception:
+                    pass
+            pw = self._playwright
+            if pw:
+                try:
+                    await pw.stop()
+                except Exception:
+                    pass
+            self.browser = None
+            self._playwright = None
+            self.context = None
+            self.page = None
+
+        self._session = ScrapingSession(
+            services_sessid=services_sessid,
+            jsession=jsession,
+            app_token=app_token,
+        )
+        logger.info(
+            f"[Hybrid] Session bootstrapped in {time.monotonic() - t0:.1f}s. "
+            f"SERVICES_SESSID={services_sessid[:8]}..."
+        )
+        return self._session
+
+    def _session_is_fresh(self) -> bool:
+        return (
+            self._session is not None
+            and (time.monotonic() - self._session.created_at) < self.SESSION_TTL
+        )
+
+    # ── HTTP client ────────────────────────────────────────────────────────
+
+    async def _open_http_client(self):
+        """Open/rotate the persistent httpx client (reused for all year searches)."""
+        assert self._session is not None
+        if self._http and not self._http.is_closed:
+            await self._http.aclose()
+            self._http = None
+        # Build Cookie header directly — more reliable than httpx cookie jar
+        # for server-set session cookies with implicit domain/path.
+        cookie_parts = [f"SERVICES_SESSID={self._session.services_sessid}"]
+        if self._session.jsession:
+            cookie_parts.append(f"JSESSION={self._session.jsession}")
+        cookie_header = "; ".join(cookie_parts)
+
+        headers = {**_HTTP_HEADERS, "Cookie": cookie_header}
+        logger.info(f"[Hybrid] HTTP client cookie: {cookie_header}")
+
+        self._http = httpx.AsyncClient(
+            headers=headers,
+            follow_redirects=True,
+            timeout=httpx.Timeout(HTTP_TIMEOUT_SECONDS, connect=15.0),
+        )
+
+    # ── Helpers ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _unwrap_ajax_html(raw: str) -> str:
+        """
+        AJAX endpoints wrap HTML inside a JSON envelope.
+        Try common key names; fall back to raw text if not JSON or no known key.
+        """
+        try:
+            data = _json.loads(raw)
+            if isinstance(data, dict):
+                for key in ("party_data", "case_history", "tab_data", "html", "data"):
+                    if key in data and isinstance(data[key], str):
+                        return data[key]
+        except Exception:
+            pass
+        return raw
+
+    # ── HTTP captcha solve ─────────────────────────────────────────────────
+
+    async def _fetch_captcha_http(self, client: httpx.AsyncClient) -> Optional[str]:
+        """
+        Refresh the server-side captcha, download the image, and solve it.
+
+        Two-step process (mirroring what the browser does):
+          1. POST getCaptcha  → server generates a captcha and returns the exact
+                                image URL with a namespace hash, e.g.
+                                securimage_show.php?c87fa13d7b5fa8d0761b64...
+          2. GET that exact URL → download the image for OCR
+
+        The hash in the URL is the Securimage namespace key — we MUST use the
+        same URL the server returned, or we'll solve a captcha from a different
+        namespace than what submitPartyName validates against.
+        """
+        import captcha_solver
+
+        captcha_path = "/tmp/ecourts_http_captcha.png"
+        try:
+            # Step 1: trigger captcha generation, get the exact image URL
+            cap_resp = await client.post(
+                _GET_CAPTCHA_URL,
+                data={"ajax_req": "true", "app_token": ""},
+            )
+            logger.info(
+                f"[Hybrid] getCaptcha: {cap_resp.status_code} "
+                f"{len(cap_resp.text)} bytes"
+            )
+
+            # Parse the JSON response to extract the captcha image src
+            captcha_url = None
+            try:
+                data = _json.loads(cap_resp.text)
+                div_html = data.get("div_captcha", "")
+                # src is JSON-escaped: src=\"\/ecourtindia_v6\/vendor\/...\"
+                m = _re.search(r'src=["\']([^"\']*securimage[^"\']*)["\']', div_html)
+                if m:
+                    raw_path = m.group(1).replace("\\/", "/")
+                    captcha_url = f"https://services.ecourts.gov.in{raw_path}"
+                    logger.info(f"[Hybrid] Captcha URL from getCaptcha: {captcha_url}")
+            except Exception as parse_err:
+                logger.warning(f"[Hybrid] Could not parse getCaptcha JSON: {parse_err}")
+
+            # Fallback: use the default securimage URL if parsing failed
+            if not captcha_url:
+                captcha_url = f"{_CAPTCHA_URL}?t={int(time.monotonic() * 1000)}"
+                logger.warning("[Hybrid] Falling back to default captcha URL")
+
+            # Step 2: download the exact captcha image the server generated
+            resp = await client.get(captcha_url)
+            resp.raise_for_status()
+            with open(captcha_path, "wb") as fh:
+                fh.write(resp.content)
+            solved = captcha_solver.solve(captcha_path)
+            logger.info(f"[Hybrid] HTTP captcha solved: '{solved}'")
+            return solved or None
+        except Exception as e:
+            logger.error(f"[Hybrid] HTTP captcha fetch failed: {e}")
+            return None
+
+    # ── Core HTTP search ───────────────────────────────────────────────────
+
+    async def _http_search_year(
+        self, client: httpx.AsyncClient, name: str, year: str
+    ) -> list[dict]:
+        """Submit party name search via HTTP and return enriched case records."""
+        last_error: str | None = None
+        for attempt in range(1, MAX_CAPTCHA_RETRIES + 1):
+            captcha_text = await self._fetch_captcha_http(client)
+            if not captcha_text:
+                logger.warning(f"[Hybrid] Captcha attempt {attempt} empty, retrying...")
+                continue
+
+            try:
+                resp = await client.post(
+                    _SEARCH_URL,
+                    data={
+                        # Exact field names/values captured from live browser POST
+                        "petres_name": name,
+                        "rgyearP": year,
+                        "case_status": "Both",
+                        "fcaptcha_code": captcha_text,
+                        "state_code": _STATE_CODE,
+                        "dist_code": _DIST_CODE,
+                        "court_complex_code": _COURT_COMPLEX_BARE,  # bare "1010303", not the @-value
+                        "est_code": "null",
+                        "ajax_req": "true",
+                        "app_token": "",
+                    },
+                )
+                resp.raise_for_status()
+            except httpx.TimeoutException:
+                last_error = (
+                    f"Year {year}: submitPartyName timed out on attempt "
+                    f"{attempt}/{MAX_CAPTCHA_RETRIES}"
+                )
+                logger.warning(f"[Hybrid] {last_error}")
+                await asyncio.sleep(min(2 * attempt, 8))
+                continue
+            except httpx.RequestError as e:
+                last_error = (
+                    f"Year {year}: submitPartyName request error on attempt "
+                    f"{attempt}/{MAX_CAPTCHA_RETRIES}: {e!r}"
+                )
+                logger.warning(f"[Hybrid] {last_error}")
+                await asyncio.sleep(min(2 * attempt, 8))
+                continue
+
+            # Debug: log response details; save artifacts only when explicitly enabled.
+            ct = resp.headers.get("content-type", "?")
+            logger.info(
+                f"[Hybrid] submitPartyName: HTTP {resp.status_code} | "
+                f"{len(resp.content)} bytes | content-type: {ct}"
+            )
+            if resp.content:
+                logger.info(f"[Hybrid] Response preview: {resp.text[:400]!r}")
+            else:
+                logger.warning("[Hybrid] EMPTY response body — session/cookie problem?")
+            if DEBUG_ARTIFACTS:
+                debug_path = f"/tmp/ecourts_resp_{year}_attempt{attempt}.html"
+                with open(debug_path, "wb") as _f:
+                    _f.write(resp.content)
+                logger.info(f"[Hybrid] Saved debug artifact: {debug_path}")
+
+            # Unwrap JSON envelope: {"party_data": "<html>", "status": 1, "div_captcha": "..."}
+            # The server returns AJAX JSON, not raw HTML.
+            html = self._unwrap_ajax_html(resp.text)
+            logger.info(f"[Hybrid] HTML for parsing: {len(html)} chars")
+
+            _lower = html.lower()
+
+            # Check captcha rejection FIRST — these responses contain
+            # "securimage_show" in the div_captcha HTML, so must be checked
+            # before the session expiry detector to avoid false positives.
+            if (
+                "invalid captcha" in _lower
+                or "incorrect captcha" in _lower
+                or "validateerror" in _lower
+                or ('"errormsg"' in resp.text and "captcha" in _lower)
+            ):
+                logger.warning(
+                    f"[Hybrid] Captcha rejected on attempt {attempt}, retrying..."
+                )
+                continue
+
+            # Session expiry: look for actual auth/redirect indicators only
+            if any(
+                marker in _lower
+                for marker in (
+                    "session expired",
+                    "please login",
+                    "login required",
+                    "invalid session",
+                )
+            ):
+                raise SessionExpiredError(
+                    f"[Hybrid] Year {year}: session expiry detected in response"
+                )
+
+            rows = await self._parse_summary_table(html=html)
+            logger.info(f"[Hybrid] Year {year}: {len(rows)} row(s)")
+
+            enriched = []
+            for idx, summary in enumerate(rows):
+                view_js = summary.pop("_view_js", None)
+                case_ref = summary.get(
+                    "Case Type/Case Number/Case Year", f"row {idx + 1}"
+                )
+                logger.info(
+                    f"  [Hybrid] [{idx + 1}/{len(rows)}] Fetching detail: {case_ref}"
+                )
+                detail = (
+                    await self._http_fetch_detail(client, view_js) if view_js else {}
+                )
+                enriched.append({**summary, **detail} if detail else summary)
+                await self._rate_limit_delay()
+
+            return enriched
+
+        if last_error:
+            raise RuntimeError(
+                f"[Hybrid] Failed to scrape year {year} after "
+                f"{MAX_CAPTCHA_RETRIES} attempts. Last error: {last_error}"
+            )
+        raise RuntimeError(
+            f"[Hybrid] Failed to solve captcha after {MAX_CAPTCHA_RETRIES} "
+            f"attempts for year {year}"
+        )
+
+    async def _http_fetch_detail(self, client: httpx.AsyncClient, view_js: str) -> dict:
+        """
+        Parse viewHistory() onclick and fetch case detail via HTTP POST.
+
+        Arg order (discovered in Phase 0):
+          viewHistory(case_no, cino, court_code, hideparty, search_flag,
+                      state_code, dist_code, court_complex_code, search_by)
+        """
+        import re
+
+        m = re.search(r"viewHistory\(([^)]+)\)", view_js)
+        if not m:
+            return {}
+        args = [a.strip().strip("'\"") for a in m.group(1).split(",")]
+        if len(args) < 3:
+            return {}
+
+        s = self._session
+        try:
+            resp = await client.post(
+                _VIEW_HISTORY_URL,
+                data={
+                    "court_code": args[2],
+                    "state_code": args[5] if len(args) > 5 else _STATE_CODE,
+                    "dist_code": args[6] if len(args) > 6 else _DIST_CODE,
+                    "court_complex_code": args[7]
+                    if len(args) > 7
+                    else _COURT_COMPLEX_CODE,
+                    "case_no": args[0],
+                    "cino": args[1],
+                    "hideparty": args[3] if len(args) > 3 else "",
+                    "search_flag": args[4] if len(args) > 4 else "CScaseNumber",
+                    "search_by": args[8] if len(args) > 8 else "CSpartyName",
+                    "ajax_req": "true",
+                    "app_token": s.app_token,
+                },
+            )
+            resp.raise_for_status()
+            html = self._unwrap_ajax_html(resp.text)
+            return await self._parse_detail_page(html=html)
+        except Exception as e:
+            logger.error(f"[Hybrid] viewHistory fetch failed: {e}")
+            return {}
+
+    # ── Public overrides ────────────────────────────────────────────────────
+
+    async def scrape_all_years(self, name: str) -> list[dict]:
+        """Bootstrap session once via browser, then HTTP for all 15 years."""
+        await self.bootstrap_session()
+        maybe_client_open = self._open_http_client()
+        if asyncio.iscoroutine(maybe_client_open):
+            await maybe_client_open
+        http = self._http
+        assert http is not None
+
+        years = self._get_available_years()
+        all_results: list[dict] = []
+
+        for i, year in enumerate(years):
+            if not self._session_is_fresh():
+                logger.info("[Hybrid] Session stale — re-bootstrapping...")
+                await self.bootstrap_session()
+                maybe_client_open = self._open_http_client()
+                if asyncio.iscoroutine(maybe_client_open):
+                    await maybe_client_open
+                http = self._http
+                assert http is not None
+
+            logger.info(f"[Hybrid] Scraping year {year} ({i + 1}/{len(years)}) [HTTP]")
+            try:
+                rows = await self._http_search_year(http, name, year)
+            except SessionExpiredError:
+                logger.warning(
+                    f"[Hybrid] Session expired on year {year}, re-bootstrapping..."
+                )
+                await self.bootstrap_session()
+                maybe_client_open = self._open_http_client()
+                if asyncio.iscoroutine(maybe_client_open):
+                    await maybe_client_open
+                http = self._http
+                assert http is not None
+                rows = await self._http_search_year(http, name, year)
+
+            for r in rows:
+                r["Search_Year"] = year
+            all_results.extend(rows)
+            logger.info(f"[Hybrid] Year {year}: {len(rows)} record(s)")
+            await self._rate_limit_delay()
+
+        return all_results
+
+    async def search_petitioner(self, name: str, year: str = "") -> list[dict]:
+        """Single-year search: bootstrap via browser if needed, then HTTP."""
+        if self._http is None or self._http.is_closed or not self._session_is_fresh():
+            await self.bootstrap_session()
+            maybe_client_open = self._open_http_client()
+            if asyncio.iscoroutine(maybe_client_open):
+                await maybe_client_open
+
+        http = self._http
+        assert http is not None
+        try:
+            return await self._http_search_year(http, name, year)
+        except SessionExpiredError as e:
+            logger.warning(f"{e} — re-bootstrapping session...")
+            await self.bootstrap_session()
+            maybe_client_open = self._open_http_client()
+            if asyncio.iscoroutine(maybe_client_open):
+                await maybe_client_open
+            http = self._http
+            assert http is not None
+            return await self._http_search_year(http, name, year)
+
+    async def close(self):
+        """Close the persistent HTTP client and any open browser."""
+        if self._http and not self._http.is_closed:
+            await self._http.aclose()
+        self._http = None
+        if self.browser:
+            try:
+                await self.browser.close()
+            except Exception:
+                pass
+            self.browser = None
+        if self._playwright:
+            try:
+                await self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = None
+        logger.info("[Hybrid] Scraper closed.")
