@@ -387,8 +387,34 @@ class BhulekhScraper:
         logger.info("Bhulekh browser closed.")
 
     async def _wait_postback_quiet(self, timeout_ms: int = 60000) -> None:
-        """Wait for ASP.NET UpdatePanel overlay to finish."""
+        """Wait for ASP.NET UpdatePanel overlay to finish.
+
+        Two-phase wait:
+          1. Wait up to 2 s for the UpdateProgress overlay to *appear* (the AJAX
+             request may not have fired yet when we enter this function).
+          2. Wait up to *timeout_ms* for the overlay to *disappear*.
+
+        Skipping phase 1 was the root cause of a race condition where the
+        function saw the overlay as already-hidden before the AJAX even started
+        and returned after only the 0.4 s sleep, letting callers read
+        still-stale dropdowns.
+        """
         assert self.page is not None
+        # Phase 1 — wait for overlay to become visible (non-fatal, short timeout).
+        try:
+            await self.page.wait_for_function(
+                """(sel) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return false;
+                    const st = window.getComputedStyle(el);
+                    return st.display !== 'none' && st.visibility !== 'hidden';
+                }""",
+                arg=UPDATE_PROGRESS,
+                timeout=2000,
+            )
+        except Exception:
+            pass  # overlay may be very brief or absent on fast responses
+        # Phase 2 — wait for overlay to become hidden (the postback has settled).
         try:
             await self.page.wait_for_function(
                 """(sel) => {
@@ -403,6 +429,44 @@ class BhulekhScraper:
         except Exception:
             logger.warning("UpdateProgress wait timed out or missing; continuing.")
         await asyncio.sleep(0.4)
+
+    async def _wait_for_dropdown_options(
+        self,
+        selector: str,
+        min_options: int = 2,
+        timeout_ms: int = 15000,
+    ) -> None:
+        """Block until *selector* <select> has at least *min_options* non-empty values.
+
+        Called after each cascading dropdown selection (district→taluka,
+        taluka→village) to guarantee the downstream dropdown is populated before
+        we try to read it.  Times out gracefully so callers can still attempt to
+        read whatever is present.
+        """
+        assert self.page is not None
+        try:
+            await self.page.wait_for_function(
+                """([sel, minOpts]) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return false;
+                    return Array.from(el.options).filter(o => o.value).length >= minOpts;
+                }""",
+                arg=[selector, min_options],
+                timeout=timeout_ms,
+            )
+            logger.info(
+                "Dropdown %s populated (≥%d options) within %dms.",
+                selector,
+                min_options,
+                timeout_ms,
+            )
+        except Exception:
+            logger.warning(
+                "Dropdown %s did not reach %d options within %dms; proceeding with current state.",
+                selector,
+                min_options,
+                timeout_ms,
+            )
 
     async def load_portal(self) -> None:
         assert self.page is not None
@@ -444,6 +508,7 @@ class BhulekhScraper:
         await rate_limit_delay()
         await self.page.select_option(SEL_DIST, value=district_value)
         await self._wait_postback_quiet()
+        await self._wait_for_dropdown_options(SEL_TALUKA)
         logger.info("[Bhulekh %s] District postback finished.", STEP_DISTRICT)
 
     async def list_taluka_options(self) -> list[dict[str, str]]:
@@ -462,6 +527,7 @@ class BhulekhScraper:
         await rate_limit_delay()
         await self.page.select_option(SEL_TALUKA, value=taluka_value)
         await self._wait_postback_quiet()
+        await self._wait_for_dropdown_options(SEL_VILLAGE)
         logger.info("[Bhulekh %s] Taluka postback finished.", STEP_TALUKA)
 
     async def list_village_options(self) -> list[dict[str, str]]:
@@ -882,8 +948,10 @@ class BhulekhScraper:
         talukas = await self.list_taluka_options()
         tv = find_option_value_by_label(talukas, taluka_label)
         if not tv:
+            t_labels = [t.get("label") for t in talukas[:20]]
             raise ValueError(
-                f"Taluka not found for {taluka_label!r} under selected district."
+                f"Taluka not found for {taluka_label!r} under selected district. "
+                f"Available ({len(talukas)}): {t_labels}..."
             )
         lab_t = next(
             (t.get("label") for t in talukas if t.get("value") == tv), tv
@@ -893,8 +961,10 @@ class BhulekhScraper:
         villages = await self.list_village_options()
         vv = find_option_value_by_label(villages, village_label)
         if not vv:
+            v_labels = [v.get("label") for v in villages[:30]]
             raise ValueError(
-                f"Village not found for {village_label!r} under selected taluka."
+                f"Village not found for {village_label!r} under selected taluka. "
+                f"Available ({len(villages)}): {v_labels}..."
             )
         lab_v = next(
             (v.get("label") for v in villages if v.get("value") == vv), vv
