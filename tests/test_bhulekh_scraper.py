@@ -85,6 +85,17 @@ def test_find_option_parentheses_english_only():
     assert find_option_value_by_label(opts, "Bar") == "1"
 
 
+def test_find_option_tolerates_question_mark_prefix_from_lossy_decode():
+    opts = [{"value": "42", "label": "दारवली"}]
+    assert find_option_value_by_label(opts, "?ारवली") == "42"
+
+
+def test_find_option_tolerates_bom_and_zero_width_chars():
+    opts = [{"value": "77", "label": "दारवली"}]
+    noisy = "\ufeff\u200bदारवली\u200d"
+    assert find_option_value_by_label(opts, noisy) == "77"
+
+
 def test_normalize_indian_mobile():
     assert normalize_indian_mobile("9999999999") is True
     assert normalize_indian_mobile("5999999999") is False

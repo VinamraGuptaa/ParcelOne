@@ -79,3 +79,11 @@ def test_match_option_label_uruli_aliases():
 def test_match_option_label_karve_nagar_aliases():
     assert IGRFreeSearchScraper._match_option_label("म .कर्वेनगर", "Karve Nagar") is True
     assert IGRFreeSearchScraper._match_option_label("कर्वेनगर", "karvenagar") is True
+
+
+def test_match_option_label_tolerates_lossy_prefix_question_mark():
+    assert IGRFreeSearchScraper._match_option_label("दारवली", "?ारवली") is True
+
+
+def test_match_option_label_tolerates_bom_and_zero_width():
+    assert IGRFreeSearchScraper._match_option_label("दारवली", "\ufeff\u200bदारवली\u200d") is True

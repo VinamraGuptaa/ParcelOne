@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Optional
 
@@ -56,6 +57,17 @@ _LABEL_ALIASES: dict[str, tuple[str, ...]] = {
     "karve nagar": ("कर्वेनगर", "म .कर्वेनगर", "karvenagar", "karve nagar"),
     "karvenagar": ("कर्वेनगर", "म .कर्वेनगर", "karve nagar"),
 }
+
+
+def _sanitize_label_input(value: str) -> str:
+    """
+    Normalize label text and remove common Unicode/encoding artifacts.
+    """
+    txt = unicodedata.normalize("NFKC", value or "")
+    txt = txt.replace("\ufeff", "")
+    txt = txt.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")
+    txt = txt.replace("\ufffd", "").replace("?", "")
+    return txt.strip()
 
 
 class IGRFreeSearchScraper:
@@ -620,7 +632,7 @@ class IGRFreeSearchScraper:
 
     @staticmethod
     def _expand_needles(label: str) -> list[str]:
-        base = (label or "").strip().lower()
+        base = _sanitize_label_input(label).lower()
         if not base:
             return []
         out = [base]
@@ -631,7 +643,7 @@ class IGRFreeSearchScraper:
 
     @staticmethod
     def _match_option_label(option_label: str, wanted: str) -> bool:
-        o = (option_label or "").strip().lower()
+        o = _sanitize_label_input(option_label).lower()
         if not o:
             return False
         for n in IGRFreeSearchScraper._expand_needles(wanted):

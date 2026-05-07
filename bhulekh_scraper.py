@@ -1270,6 +1270,22 @@ _DEV_TO_LATIN_SUFFIX = {v: k for k, v in _LATIN_TO_DEV_SUFFIX.items()}
 _DEV_TO_ASCII_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
 
 
+def _sanitize_label_input(value: str) -> str:
+    """
+    Clean user-provided label text for resilient matching.
+
+    Handles common copy/paste and encoding artifacts:
+      - BOM/zero-width chars
+      - Unicode replacement char (U+FFFD)
+      - literal '?' introduced by lossy decode
+    """
+    txt = unicodedata.normalize("NFKC", value or "")
+    txt = txt.replace("\ufeff", "")
+    txt = txt.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")
+    txt = txt.replace("\ufffd", "").replace("?", "")
+    return txt.strip()
+
+
 def _canonical_label_text(value: str) -> str:
     """
     Normalize script/format variants commonly seen in Bhulekh dropdown labels.
@@ -1277,7 +1293,7 @@ def _canonical_label_text(value: str) -> str:
       - २०४/६अ -> 204/6अ
       - 204 / 6 A -> 204/6a
     """
-    txt = unicodedata.normalize("NFKC", value or "")
+    txt = _sanitize_label_input(value)
     txt = txt.translate(_DEV_TO_ASCII_DIGITS)
     txt = txt.strip().lower()
     txt = re.sub(r"\s+", "", txt)
@@ -1306,7 +1322,8 @@ def _match_needles_against_label(label: str, needles: list[str]) -> bool:
 
 
 def _expand_label_needles(label_substring: str) -> list[str]:
-    base = label_substring.strip().lower()
+    cleaned = _sanitize_label_input(label_substring)
+    base = cleaned.lower()
     needles: list[str] = [base] if base else []
     extra = _LABEL_ALIASES.get(base)
     if extra:
