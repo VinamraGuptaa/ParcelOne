@@ -54,6 +54,11 @@ def test_find_option_marathi_alias_for_baner():
     assert find_option_value_by_label(opts, "Baner") == "11"
 
 
+def test_find_option_marathi_input_variant_maps_to_mulshi_aliases():
+    opts = [{"value": "12", "label": "मुळशी"}]
+    assert find_option_value_by_label(opts, "मुळ्शी") == "12"
+
+
 def test_find_option_marathi_alias_for_karve_nagar():
     opts = [{"value": "22", "label": "म .कर्वेनगर"}]
     assert find_option_value_by_label(opts, "Karve Nagar") == "22"

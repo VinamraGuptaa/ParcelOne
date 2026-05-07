@@ -1268,6 +1268,28 @@ _LATIN_TO_DEV_SUFFIX = {
 }
 _DEV_TO_LATIN_SUFFIX = {v: k for k, v in _LATIN_TO_DEV_SUFFIX.items()}
 _DEV_TO_ASCII_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
+_LABEL_ALIAS_LOOKUP: dict[str, tuple[str, ...]] = {}
+
+
+def _build_label_alias_lookup() -> dict[str, tuple[str, ...]]:
+    """
+    Build reverse alias lookup so Marathi inputs (e.g. मुळ्शी) also expand.
+    """
+    clusters: list[set[str]] = []
+    for key, members in _LABEL_ALIASES.items():
+        cluster = {key.strip().lower()}
+        cluster.update(m.strip().lower() for m in members if (m or "").strip())
+        clusters.append(cluster)
+
+    lookup: dict[str, tuple[str, ...]] = {}
+    for cluster in clusters:
+        expanded = tuple(sorted(cluster))
+        for token in cluster:
+            lookup[token] = expanded
+    return lookup
+
+
+_LABEL_ALIAS_LOOKUP = _build_label_alias_lookup()
 
 
 def _sanitize_label_input(value: str) -> str:
@@ -1325,7 +1347,7 @@ def _expand_label_needles(label_substring: str) -> list[str]:
     cleaned = _sanitize_label_input(label_substring)
     base = cleaned.lower()
     needles: list[str] = [base] if base else []
-    extra = _LABEL_ALIASES.get(base)
+    extra = _LABEL_ALIAS_LOOKUP.get(base)
     if extra:
         needles.extend(extra)
     # Handle survey label suffix equivalence (e.g. 204/6A <-> 204/6अ).
