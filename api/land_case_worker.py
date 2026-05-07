@@ -596,14 +596,31 @@ async def run_land_case_workflow(workflow_id: str) -> None:
             await db.commit()
 
         parallel_contexts = max(1, min(2, int(os.getenv("IGR_PARALLEL_CONTEXTS", "2"))))
+        # Seconds to delay slice2's browser launch relative to slice1.  Staggering
+        # avoids hammering the IGR server with two simultaneous page.goto calls,
+        # which increases the chance of both timing out.
+        igr_slice_stagger = float(os.getenv("IGR_SLICE_STAGGER_SECONDS", "10"))
         completed_years = 0
         progress_lock = asyncio.Lock()
 
-        async def _run_igr_year_slice(year_slice: list[str], slice_id: str) -> list[dict]:
+        async def _run_igr_year_slice(
+            year_slice: list[str],
+            slice_id: str,
+            stagger_delay: float = 0.0,
+        ) -> list[dict]:
             nonlocal completed_years
             local_matches: list[dict] = []
             if not year_slice:
                 return local_matches
+            if stagger_delay > 0:
+                logger.info(
+                    "[workflow:%s] IGR slice=%s: staggering browser start by %.0fs "
+                    "to avoid simultaneous server load.",
+                    workflow_id,
+                    slice_id,
+                    stagger_delay,
+                )
+                await asyncio.sleep(stagger_delay)
             igr = IGRFreeSearchScraper(headless=True)
             igr_scrapers.append(igr)
             try:
@@ -673,7 +690,11 @@ async def run_land_case_workflow(workflow_id: str) -> None:
         try:
             slice_results = await asyncio.gather(
                 *[
-                    _run_igr_year_slice(year_slice, f"slice{idx + 1}")
+                    _run_igr_year_slice(
+                        year_slice,
+                        f"slice{idx + 1}",
+                        stagger_delay=idx * igr_slice_stagger,
+                    )
                     for idx, year_slice in enumerate(year_slices)
                     if year_slice
                 ]

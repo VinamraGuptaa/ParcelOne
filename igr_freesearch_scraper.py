@@ -31,6 +31,13 @@ logger = logging.getLogger(__name__)
 IGR_URL = "https://freesearchigrservice.maharashtra.gov.in/"
 MAX_CAPTCHA_RETRIES = 5
 
+# Navigation timeout for page.goto / page.reload calls.  The IGR govt portal
+# can be genuinely slow; 90 s is a pragmatic baseline.  Override via env var.
+IGR_GOTO_TIMEOUT_MS = int(os.getenv("IGR_GOTO_TIMEOUT_MS", "90000"))
+# How many times to retry a timed-out navigation *within* setup_driver before
+# propagating the error to the outer _run_with_retries loop.
+IGR_GOTO_RETRIES = int(os.getenv("IGR_GOTO_RETRIES", "3"))
+
 SEL_YEAR = "#ddlFromYear1"
 SEL_DISTRICT = "#ddlDistrict1"
 SEL_TALUKA = "#ddltahsil"
@@ -291,11 +298,54 @@ class IGRFreeSearchScraper:
             else:
                 raise
         self.page.on("dialog", lambda d: asyncio.create_task(d.dismiss()))
-        await self.page.goto(IGR_URL, wait_until="domcontentloaded", timeout=60000)
+        await self._navigate_to_portal()
         await asyncio.sleep(1.0)
         await self._close_startup_popup()
         await self._switch_to_rest_of_maharashtra_tab()
         logger.info("IGR scraper ready.")
+
+    async def _navigate_to_portal(self) -> None:
+        """Navigate to IGR_URL with per-attempt retries and exponential backoff.
+
+        This keeps the retry logic *inside* setup_driver so a slow network
+        response does not cause the outer _run_with_retries loop to tear down
+        and recreate the entire browser session (which is expensive and unhelpful
+        when the browser itself is healthy — only the network is slow).
+        """
+        assert self.page is not None
+        last_exc: Exception | None = None
+        for attempt in range(1, IGR_GOTO_RETRIES + 1):
+            try:
+                logger.info(
+                    "IGR portal navigation attempt %s/%s (timeout=%dms).",
+                    attempt,
+                    IGR_GOTO_RETRIES,
+                    IGR_GOTO_TIMEOUT_MS,
+                )
+                await self.page.goto(
+                    IGR_URL,
+                    wait_until="domcontentloaded",
+                    timeout=IGR_GOTO_TIMEOUT_MS,
+                )
+                logger.info("IGR portal navigation succeeded on attempt %s.", attempt)
+                return
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "IGR portal navigation attempt %s/%s failed: %s",
+                    attempt,
+                    IGR_GOTO_RETRIES,
+                    exc,
+                )
+                if attempt < IGR_GOTO_RETRIES:
+                    backoff = 5.0 * attempt  # 5 s, 10 s, …
+                    logger.info(
+                        "IGR portal navigation: retrying in %.0fs.", backoff
+                    )
+                    await asyncio.sleep(backoff)
+        raise RuntimeError(
+            f"IGR portal navigation failed after {IGR_GOTO_RETRIES} attempts: {last_exc}"
+        ) from last_exc
 
     async def close(self) -> None:
         if self.context:
@@ -1120,7 +1170,7 @@ class IGRFreeSearchScraper:
                             attempt,
                             MAX_CAPTCHA_RETRIES,
                         )
-                        await self.page.reload(wait_until="domcontentloaded", timeout=60000)
+                        await self.page.reload(wait_until="domcontentloaded", timeout=IGR_GOTO_TIMEOUT_MS)
                         await asyncio.sleep(0.8)
                         await self._close_startup_popup()
                         await self._switch_to_rest_of_maharashtra_tab()
