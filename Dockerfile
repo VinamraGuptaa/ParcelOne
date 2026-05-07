@@ -1,10 +1,11 @@
-# ── eCourts Scraper — Render (Docker) deployment ──────────────────────────
-# Uses python:3.11-slim and installs Playwright Chromium with all system deps.
+# ── eCourts Scraper — GCP/Cloud Run friendly Docker image ─────────────────
+# Uses python:3.11-slim and installs Playwright Chromium with required libs.
 
 FROM python:3.11-slim
 
 # Install system dependencies required by Playwright's Chromium build
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     curl \
     libnss3 \
     libnspr4 \
@@ -26,7 +27,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2 \
     libasound2 \
     libatspi2.0-0 \
+    libgtk-3-0 \
+    libgdk-pixbuf2.0-0 \
+    libxshmfence1 \
     fonts-liberation \
+    fonts-noto-core \
     libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
@@ -52,6 +57,17 @@ RUN uv run playwright install chromium
 # a ~60s delay that can trigger Render's health check timeout.
 RUN uv run python -c "from rapidocr_onnxruntime import RapidOCR; RapidOCR()"
 
+# Run as non-root in deployed containers.
+RUN useradd --create-home --shell /bin/bash appuser && chown -R appuser:appuser /app
+USER appuser
+
 EXPOSE 8000
+
+ENV PYTHONUNBUFFERED=1
+ENV DEV=0
+ENV ECOURTS_API_SEARCH_PAGE_SIZE=20
+ENV ECOURTS_API_CASE_STATUSES=PENDING
+ENV ECOURTS_API_JUDICIAL_SECTIONS=CIV
+ENV ECOURTS_API_CASE_TYPES=
 
 CMD ["uv", "run", "python", "server.py"]

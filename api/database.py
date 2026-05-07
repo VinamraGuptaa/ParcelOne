@@ -15,7 +15,9 @@ from sqlalchemy import event
 
 def _get_database_url() -> str:
     url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./ecourts.db")
-    # Render/Supabase sometimes give postgresql:// — fix dialect for asyncpg
+    # Cloud providers often provide sync postgres DSNs; normalize for asyncpg.
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+asyncpg://", 1)
     if url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
     return url

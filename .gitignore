@@ -20,6 +20,7 @@ wheels/
 
 # Playwright browsers
 /ms-playwright/
+/.playwright-browsers/
 
 # Scraper CSV output files
 *.csv
@@ -27,6 +28,11 @@ wheels/
 # Temp files written by scraper
 /tmp/ecourts_*.png
 /tmp/ecourts_*.html
+/tmp/bhulekh_*.png
+
+# Local Bhulekh HTML output
+artifacts/
 
 # macOS
 .DS_Store
+

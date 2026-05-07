@@ -16,13 +16,18 @@ import logging
 import os
 import random
 import re as _re
+import shutil
+import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 import httpx
 import pandas as pd
 from bs4 import BeautifulSoup
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+
+from playwright_launch_args import chromium_launch_args
 
 # captcha_solver is imported lazily inside solve_captcha() to defer torch
 # loading until after Chromium is already running (saves ~400MB at launch time)
@@ -109,35 +114,226 @@ class ECourtsScraper:
         """Launch Playwright Chromium browser and create a page."""
         import time
 
+        def _resolve_chromium_executable() -> str | None:
+            explicit = (os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH") or "").strip()
+            if explicit and Path(explicit).exists():
+                return explicit
+            return None
+
+        def _resolve_system_chromium_executable() -> str | None:
+            candidates = (
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            )
+            for c in candidates:
+                if Path(c).exists():
+                    return c
+            return None
+
+        project_browsers_path = str((Path(__file__).resolve().parent / ".playwright-browsers").resolve())
+        browsers_path_env = (os.getenv("PLAYWRIGHT_BROWSERS_PATH") or "").strip()
+        if not browsers_path_env or "cursor-sandbox-cache" in browsers_path_env:
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = project_browsers_path
+            logger.warning(
+                "Using PLAYWRIGHT_BROWSERS_PATH=%s (previous=%r)",
+                project_browsers_path,
+                browsers_path_env or None,
+            )
+
+        async def _install_playwright_chromium(*, original_error: str = "") -> None:
+            auto_install = (os.getenv("PLAYWRIGHT_AUTO_INSTALL") or "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+            if not auto_install:
+                raise RuntimeError(
+                    "Playwright Chromium binary is missing and runtime auto-install is disabled. "
+                    "Run once: PLAYWRIGHT_BROWSERS_PATH=\"$PWD/.playwright-browsers\" "
+                    ".venv/bin/python -m playwright install chromium "
+                    "and restart backend. (Set PLAYWRIGHT_AUTO_INSTALL=1 to allow runtime install.) "
+                    f"Original launch error: {original_error}"
+                )
+
+            async def _run_install_once() -> tuple[int, str]:
+                proc = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-m",
+                    "playwright",
+                    "install",
+                    "chromium",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                out, err = await proc.communicate()
+                detail = (err or out or b"").decode("utf-8", errors="ignore").strip()
+                return proc.returncode, detail
+
+            logger.warning(
+                "Playwright Chromium binary missing; running '%s -m playwright install chromium' (PLAYWRIGHT_BROWSERS_PATH=%s).",
+                sys.executable,
+                os.getenv("PLAYWRIGHT_BROWSERS_PATH"),
+            )
+            code, detail = await _run_install_once()
+            if code == 0:
+                logger.info("Playwright Chromium install completed.")
+                return
+            if "eperm" in detail.lower() and "__dirlock" in detail.lower():
+                lock_path = Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"]) / "__dirlock"
+                try:
+                    shutil.rmtree(lock_path, ignore_errors=True)
+                    if lock_path.exists():
+                        lock_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                logger.warning("Playwright dir lock cleanup attempted at %s; retrying install once.", lock_path)
+                code, detail = await _run_install_once()
+                if code == 0:
+                    logger.info("Playwright Chromium install completed after dirlock cleanup.")
+                    return
+            raise RuntimeError(f"Playwright install chromium failed (exit {code}): {detail}")
+        
+        def _is_gl_launch_failure(exc: Exception) -> bool:
+            msg = str(exc).lower()
+            needles = (
+                "egl_not_initialized",
+                "vk_ext_metal_surface",
+                "vk_khr_surface",
+                "gldisplayegl::initialize failed",
+                "target page, context or browser has been closed",
+            )
+            return any(n in msg for n in needles)
+
+        def _is_missing_executable_error(exc: Exception) -> bool:
+            msg = str(exc).lower()
+            return "executable doesn't exist" in msg or "playwright install" in msg
+
         browsers_path = os.environ.get(
             "PLAYWRIGHT_BROWSERS_PATH", "~/.cache/ms-playwright"
         )
+        executable_path = _resolve_chromium_executable()
         logger.info(
             f"Launching Playwright Chromium (headless={self.headless}, browsers_path={browsers_path})..."
         )
         t0 = time.monotonic()
         self._playwright = await async_playwright().start()
-        self.browser = await self._playwright.chromium.launch(
-            headless=self.headless,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--no-zygote",
-                "--single-process",
-            ],
-        )
+        allow_headed_fallback = (os.getenv("PLAYWRIGHT_ALLOW_HEADED_FALLBACK") or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        explicit_executable_path = executable_path
+        playwright_executable_path = (self._playwright.chromium.executable_path or "").strip()
+        executable_path = explicit_executable_path or (playwright_executable_path if Path(playwright_executable_path).exists() else None)
+        if explicit_executable_path:
+            logger.info("Using explicit Chromium executable at %s", explicit_executable_path)
+        elif executable_path:
+            logger.info("Using Playwright Chromium executable at %s", executable_path)
+        browser_home = (Path(__file__).resolve().parent / ".playwright-home").resolve()
+        browser_tmp = (Path(__file__).resolve().parent / ".playwright-tmp").resolve()
+        browser_home.mkdir(parents=True, exist_ok=True)
+        browser_tmp.mkdir(parents=True, exist_ok=True)
+        browser_env = {
+            **os.environ,
+            "HOME": str(browser_home),
+            "TMPDIR": str(browser_tmp),
+            "XDG_CONFIG_HOME": str(browser_home / ".config"),
+            "XDG_CACHE_HOME": str(browser_home / ".cache"),
+        }
+        launch_args = chromium_launch_args()
+        try:
+            launch_kwargs: dict[str, object] = {
+                "headless": self.headless,
+                "args": launch_args,
+                "env": browser_env,
+            }
+            if executable_path:
+                launch_kwargs["executable_path"] = executable_path
+            self.browser = await self._playwright.chromium.launch(**launch_kwargs)
+        except Exception as exc:
+            if _is_missing_executable_error(exc):
+                msg = str(exc).lower()
+                if "chrome-headless-shell-mac-x64" in msg:
+                    allow_system = (os.getenv("PLAYWRIGHT_ALLOW_SYSTEM_EXECUTABLE") or "").strip().lower() in {"1", "true", "yes"}
+                    system_executable = (executable_path or _resolve_system_chromium_executable()) if allow_system else None
+                    if not system_executable:
+                        await _install_playwright_chromium(original_error=str(exc))
+                        launch_kwargs = {"headless": self.headless, "args": launch_args, "env": browser_env}
+                        if executable_path:
+                            launch_kwargs["executable_path"] = executable_path
+                        self.browser = await self._playwright.chromium.launch(**launch_kwargs)
+                    else:
+                        logger.warning(
+                            "Headless shell x64 binary missing; retrying eCourts launch with system Chromium fallback (headless=%s).",
+                            self.headless,
+                        )
+                        launch_kwargs = {
+                            "headless": self.headless,
+                            "args": launch_args,
+                            "env": browser_env,
+                            "executable_path": system_executable,
+                        }
+                        self.browser = await self._playwright.chromium.launch(**launch_kwargs)
+                else:
+                    await _install_playwright_chromium(original_error=str(exc))
+                    launch_kwargs: dict[str, object] = {
+                        "headless": self.headless,
+                        "args": launch_args,
+                        "env": browser_env,
+                    }
+                    if executable_path:
+                        launch_kwargs["executable_path"] = executable_path
+                    self.browser = await self._playwright.chromium.launch(**launch_kwargs)
+            elif self.headless and _is_gl_launch_failure(exc) and allow_headed_fallback:
+                logger.warning(
+                    "eCourts scraper headless Chromium launch failed with GL init error; retrying headed fallback."
+                )
+                launch_kwargs: dict[str, object] = {
+                    "headless": False,
+                    "args": launch_args,
+                    "env": browser_env,
+                }
+                if executable_path:
+                    launch_kwargs["executable_path"] = executable_path
+                self.browser = await self._playwright.chromium.launch(**launch_kwargs)
+            else:
+                raise
         logger.info(f"Chromium launched in {time.monotonic() - t0:.1f}s.")
-        self.context = await self.browser.new_context(
-            viewport={"width": 1920, "height": 1080},
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-        )
-        self.page = await self.context.new_page()
+        try:
+            self.context = await self.browser.new_context(
+                viewport={"width": 1440, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            )
+            self.page = await self.context.new_page()
+        except Exception as exc:
+            if self.headless and _is_gl_launch_failure(exc) and allow_headed_fallback:
+                logger.warning(
+                    "eCourts scraper context/page creation failed under headless Chromium; relaunching headed fallback."
+                )
+                try:
+                    await self.browser.close()
+                except Exception:
+                    pass
+                self.browser = await self._playwright.chromium.launch(
+                    headless=False,
+                    args=launch_args,
+                    env=browser_env,
+                )
+                self.context = await self.browser.new_context(
+                    viewport={"width": 1440, "height": 900},
+                    user_agent=(
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                )
+                self.page = await self.context.new_page()
+            else:
+                raise
 
         # Auto-accept any JS alert dialogs
         self.page.on("dialog", lambda d: asyncio.create_task(d.accept()))
@@ -145,10 +341,19 @@ class ECourtsScraper:
 
     async def close(self):
         """Close the browser and stop Playwright."""
+        if self.context:
+            try:
+                await self.context.close()
+            except Exception:
+                pass
+            self.context = None
+        self.page = None
         if self.browser:
             await self.browser.close()
+            self.browser = None
         if self._playwright:
             await self._playwright.stop()
+            self._playwright = None
         logger.info("Browser closed.")
 
     # ------------------------------------------------------------------ #
@@ -283,7 +488,7 @@ class ECourtsScraper:
             await captcha_img.screenshot(path=captcha_path)
             logger.info("Captcha image captured.")
 
-            solved_text = captcha_solver.solve(captcha_path)
+            solved_text = captcha_solver.solve(captcha_path, mode="rapidocr_only")
             logger.info(f"Captcha solved: '{solved_text}'")
 
             try:
@@ -1134,6 +1339,13 @@ class HybridECourtsScraper(ECourtsScraper):
                 "() => document.getElementById('app_token')?.value || ''"
             )
         finally:
+            if self.context:
+                try:
+                    await self.context.close()
+                except Exception:
+                    pass
+                self.context = None
+            self.page = None
             if self.browser:
                 try:
                     await self.browser.close()
@@ -1147,8 +1359,6 @@ class HybridECourtsScraper(ECourtsScraper):
                     pass
             self.browser = None
             self._playwright = None
-            self.context = None
-            self.page = None
 
         self._session = ScrapingSession(
             services_sessid=services_sessid,
@@ -1280,7 +1490,7 @@ class HybridECourtsScraper(ECourtsScraper):
                 resp.raise_for_status()
                 with open(captcha_path, "wb") as fh:
                     fh.write(resp.content)
-                solved = captcha_solver.solve(captcha_path)
+                solved = captcha_solver.solve(captcha_path, mode="rapidocr_only")
                 logger.info(f"[Hybrid] HTTP captcha solved: '{solved}'")
                 return solved or None
             except (httpx.RequestError, httpx.TimeoutException) as e:
@@ -1565,6 +1775,13 @@ class HybridECourtsScraper(ECourtsScraper):
         if self._http and not self._http.is_closed:
             await self._http.aclose()
         self._http = None
+        if self.context:
+            try:
+                await self.context.close()
+            except Exception:
+                pass
+            self.context = None
+        self.page = None
         if self.browser:
             try:
                 await self.browser.close()

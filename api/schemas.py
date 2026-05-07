@@ -114,3 +114,187 @@ class CasesListResponse(BaseModel):
     job_id: str
     cases: list[CaseResponse]
     total: int
+
+
+class LandCaseWorkflowCreateRequest(BaseModel):
+    district_label: Optional[str] = "Pune"
+    taluka_label: Optional[str] = "Haveli"
+    village_label: str
+    survey_part1: str
+    survey_option_label: str
+    owner_name: Optional[str] = None
+    idempotency_key: Optional[str] = None
+
+    @field_validator(
+        "district_label",
+        "taluka_label",
+        "village_label",
+        "survey_part1",
+        "survey_option_label",
+    )
+    @classmethod
+    def required_fields_not_blank(cls, v: str) -> str:
+        val = (v or "").strip()
+        if not val:
+            raise ValueError("Field must not be blank.")
+        return val
+
+    @field_validator("district_label", "taluka_label")
+    @classmethod
+    def default_location_when_missing(cls, v: Optional[str], info) -> str:
+        val = (v or "").strip()
+        if val:
+            return val
+        if info.field_name == "district_label":
+            return "Pune"
+        return "Haveli"
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def normalize_idempotency_key(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        out = v.strip()
+        if not out:
+            return None
+        if len(out) > 128:
+            raise ValueError("idempotency_key must be <= 128 chars.")
+        return out
+
+    @field_validator("owner_name")
+    @classmethod
+    def normalize_owner_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        out = v.strip()
+        return out or None
+
+
+class LandEntityResponse(BaseModel):
+    occupant_primary_name: Optional[str]
+    occupant_candidates: list[str]
+    mutation_numbers: list[str]
+    extraction_confidence: float
+
+
+class NameVariantResponse(BaseModel):
+    variant_text: str
+    variant_kind: str
+    quality_score: float
+
+
+class WorkflowCaseHitResponse(BaseModel):
+    search_year: Optional[str]
+    case_id: Optional[str]
+    cnr_number: Optional[str]
+    case_type: Optional[str]
+    court: Optional[str]
+    parties_text: Optional[str]
+    is_civil: bool
+    name_match_score: float
+    matched_variant: Optional[str]
+    match_explanation: Optional[str]
+    final_rank: int
+
+
+class WorkflowIgrHitResponse(BaseModel):
+    survey_number: str
+    search_year: str
+    district_label: Optional[str]
+    taluka_label: Optional[str]
+    village_label: Optional[str]
+    source_region: str
+    raw: dict
+
+
+class EcourtsApiCallResponse(BaseModel):
+    request_kind: str
+    endpoint: str
+    method: str
+    litigants_query: Optional[str]
+    search_filters: Optional[dict] = None
+    response_status: Optional[int]
+    provider_error_code: Optional[str]
+    retryable: Optional[bool]
+    is_success: bool
+
+
+class EcourtsApiCaseResponse(BaseModel):
+    cnr_number: Optional[str]
+    case_type: Optional[str]
+    case_type_raw: Optional[str]
+    court: Optional[str]
+    court_no: Optional[str]
+    district: Optional[str]
+    state: Optional[str]
+    case_number: Optional[str]
+    cnr_year: Optional[str]
+    filing_number: Optional[str]
+    filing_date: Optional[str]
+    registration_number: Optional[str]
+    registration_date: Optional[str]
+    first_hearing_date: Optional[str]
+    next_hearing_date: Optional[str]
+    decision_date: Optional[str]
+    petitioners: list[str] = []
+    respondents: list[str] = []
+    petitioner_advocates: list[str] = []
+    respondent_advocates: list[str] = []
+    case_category_facet_path: Optional[str]
+    parties_text: Optional[str]
+    case_status: Optional[str]
+    is_civil: bool
+    is_pending: bool
+    final_rank: Optional[int]
+    source_stage: str
+    raw: dict
+
+
+class LandCaseWorkflowResponse(BaseModel):
+    workflow_id: str
+    status: str
+    progress_message: Optional[str]
+    error_message: Optional[str]
+    district_label: str
+    taluka_label: str
+    village_label: str
+    survey_part1: str
+    survey_option_label: str
+    owner_name: Optional[str]
+    occupant_primary_name: Optional[str]
+    extraction_confidence: Optional[float]
+    years_total: int
+    years_done: int
+    total_hits: int
+    ecourts_api_metrics: Optional[dict] = None
+    created_at: datetime
+    started_at: Optional[datetime]
+    finished_at: Optional[datetime]
+
+    @computed_field
+    @property
+    def progress_pct(self) -> int:
+        if self.years_total > 0:
+            return int(self.years_done / self.years_total * 100)
+        return 0
+
+
+class LandCaseWorkflowResultsResponse(BaseModel):
+    workflow_id: str
+    owner_name: Optional[str]
+    entity: Optional[LandEntityResponse]
+    variants: list[NameVariantResponse]
+    survey_options: list[str]
+    hits: list[WorkflowCaseHitResponse]
+    igr_hits: list[WorkflowIgrHitResponse]
+    total_hits: int
+    ecourts_api_metrics: Optional[dict] = None
+    ecourts_api_calls: list[EcourtsApiCallResponse] = []
+    ecourts_api_cases: list[EcourtsApiCaseResponse] = []
+
+
+class LandCaseWorkflowArtifactsResponse(BaseModel):
+    workflow_id: str
+    pdf_path: Optional[str]
+    html_path: Optional[str]
+    ranked_csv_path: Optional[str]

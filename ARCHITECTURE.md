@@ -1,6 +1,6 @@
 # eCourts India Case Scraper — Living Architecture Doc
 
-> Last updated: 2026-04-13 (hybrid browser+HTTP scraper; RapidOCR; Render Docker deployment)
+> Last updated: 2026-04-18 (Unified land-to-cases workflow implemented: API + worker + ranking + tests)
 > Update this file whenever a decision is made, a component changes, or a known issue is resolved.
 
 ---
@@ -25,6 +25,113 @@ A full-stack web tool that scrapes case records from [eCourts India](https://ser
 
 ---
 
+## Maharashtra Bhulekh (land records)
+
+**Status (2026-04-18):** Implemented as a Playwright scraper with CLI support and integrated into the new **land-to-cases workflow** backend pipeline. Primary output remains a **verification PDF** (7/12 panel only); optional raw HTML/assets are kept for debugging/audit.
+
+**Portal:** [bhulekh.mahabhumi.gov.in/NewBhulekh.aspx](https://bhulekh.mahabhumi.gov.in/NewBhulekh.aspx) — ASP.NET WebForms (`UpdatePanel`, `__doPostBack` chain). The UI is mixed Marathi/English; language is forced to **English** via `#ContentPlaceHolder1_ddllangforAll` = `en_in`.
+
+**Flow implemented in [`bhulekh_scraper.py`](bhulekh_scraper.py):**
+1. Load `NewBhulekh.aspx` (default: user does **not** know 11-digit ULPIN; record type **7/12** is default).
+2. **District** → **Taluka** → **Village** (each change triggers a postback; scraper waits for the UpdatePanel overlay).
+3. **Survey type** dropdown (`ddlSelectSearchType`): default option value **`2`** = सर्वे नंबर (numeric survey), matching typical “survey number + part 1” use.
+4. Enter **Survey number (part 1)** (`txtcsno`), click **Search** (`btnsearchfind`), wait for **Survey number** dropdown (`ddlsurveyno`) to populate.
+5. Select survey line, enter **mobile** (default **`9999999999`** — valid per site regex `[6-9][0-9]{9}`), set language **English**, OCR **captcha** from `#ContentPlaceHolder1_captchaImage` using [`captcha_solver.py`](captcha_solver.py) (**`ddddocr` first over multiple denoise/threshold variants, RapidOCR fallback**), submit (`btnmainsubmit`).
+6. Determine submit outcome using explicit result signals (visible `showPopUp/show8a/showreport`, `ImgPC`, `lblpc`) before unchanged-form heuristics, then print to PDF.
+7. Save **panel-focused verification PDF** to `--output` (default `artifacts/bhulekh_document.pdf`). Optional `--save-html` and `--save-submit-assets` keep raw response/debug artifacts.
+
+**Rate limiting:** Reuses the same randomized delay band as eCourts (**3–7 s**) between major steps (`MIN_DELAY_SECONDS` / `MAX_DELAY_SECONDS` in `bhulekh_scraper.py`) to avoid bursting the origin.
+
+**CLI (via [`main.py`](main.py)):**
+| Command | Purpose |
+|--------|---------|
+| `uv run python main.py bhulekh --list-districts` | Dump district `<option>` value/label JSON to stdout |
+| `uv run python main.py bhulekh --snapshot --district-value X --taluka-value Y` | Dump districts + talukas + villages for that drill-down |
+| `uv run python main.py bhulekh --district-value … --taluka-value … --village-value … --survey-part1 … --survey-number-value … [--output path]` | Full run; writes verification PDF |
+| `uv run python main.py bhulekh --district-label Pune --taluka-label Haveli --village-label Wagholi --survey-part1 1530 --survey-option-label "1530/3"` | Resolve Marathi dropdowns by alias + English hints; saves verification PDF |
+
+**Local backend (for API / health check while testing):** `uv run python server.py` → listens on `$PORT` or **8000**; probe `GET /api/health`.
+
+**Step logs:** Lines prefixed with `[Bhulekh 1/9]` … `[Bhulekh 9/9]` show portal load, each dropdown postback, survey search, captcha/submit timing.
+
+**Tests:** [`tests/test_bhulekh_scraper.py`](tests/test_bhulekh_scraper.py) — HTML parsing helpers, mobile validation, defaults (no live browser).
+
+**Next steps (if needed):** optional manual captcha entry mode for headed runs, stronger acceptance-rate telemetry over repeated submit loops, optional HTTP-only emulation of postbacks (harder than eCourts due to ViewState size).
+
+---
+
+## Unified Land-to-Cases Workflow (new)
+
+This workflow links Bhulekh land-record retrieval with eCourts name-based case search and ranking.
+
+```mermaid
+flowchart LR
+  userInput[LocationSurveyInput] --> workflowApi[WorkflowAPI]
+  workflowApi --> bhulekhStage[BhulekhRetrievalAndPDF]
+  bhulekhStage --> extractionStage[OccupantMutationExtraction]
+  extractionStage --> variantsStage[NameVariantGeneration]
+  variantsStage --> ecourtsStage[Ecourts15YearSearch]
+  ecourtsStage --> rankStage[CivilFirstRelevanceRanking]
+  rankStage --> resultsApi[WorkflowResultsAPI]
+```
+
+### Endpoints
+- `POST /api/workflows/land-case-search`
+- `GET /api/workflows/{workflow_id}`
+- `GET /api/workflows/{workflow_id}/results`
+- `GET /api/workflows/{workflow_id}/artifacts`
+
+### Workflow states
+- `pending_input`
+- `bhulekh_running`
+- `name_variants_ready`
+- `ecourts_running`
+- `ranked_done`
+- `failed`
+
+### Persistence model
+- `land_case_workflows`: orchestration state, progress, artifact paths, extraction summary, total ranked hits.
+- `land_entities`: extracted occupant candidates + mutation numbers + confidence.
+- `name_variants`: deterministic variant set with variant kind and quality score.
+- `workflow_case_hits`: ranked case hits with `is_civil`, `name_match_score`, explanation, and `final_rank`.
+- `ecourts_api_calls`: per-request API audit log (kind, endpoint, status, retryability, provider code).
+- `ecourts_api_cases`: normalized API case snapshots (`cnr`, parties, case status, pending flag) with full raw JSON.
+- `ecourts_rank_cache`: 15-minute ranked JSON cache keyed by normalized petitioner+location+survey token.
+
+### LLD: matching and ranking
+- Extraction first reads submit HTML text for occupant/mutation clues; optional PDF text parse is attempted when runtime supports it.
+- Variant generation (English-first): normalization, token reorder, common spelling replacements, initials+surname.
+- eCourts workflow now supports **API-first mode** (exact owner name query) with scraper fallback when API key is absent.
+- API mode does **not** use name variants for query fanout; it ranks using owner-name relevance + IGR seller/purchaser overlap.
+- Final ordering is deterministic: `civil first` -> `higher score` -> `year`.
+
+### eCourts API cost controls
+- Config: `ECOURTS_API_KEY`, optional `ECOURTS_API_BASE_URL`, optional `ECOURTS_API_DETAIL_LIMIT` (default 20).
+- Additional throttling config: `ECOURTS_API_MIN_INTERVAL_MS` and `ECOURTS_API_DETAIL_CONCURRENCY`.
+- Request accounting stored in workflow (`ecourts_api_metrics_json`) and exposed in workflow result APIs.
+- Worker cache-first behavior: check `ecourts_rank_cache` (15 min TTL) before API calls; on hit, skip API fanout.
+- Rate card currently modeled from provided base rates:
+  - `GET /search` = ₹0.20
+  - `GET /case/{cnr}` = ₹0.50
+  - `POST /case/{cnr}/refresh` = ₹0.25
+- Cost formula used per workflow: `0.20 * search_requests + 0.50 * detail_requests + 0.25 * refresh_requests`.
+- Retry/backoff policy: retry 429/5xx with capped attempts and linear backoff; avoid retrying non-retryable status classes.
+
+### Test strategy implemented
+- Unit:
+  - `tests/test_land_case_flow.py`: extraction, bounded variants, exact/fuzzy scoring, civil-first ranking.
+- Contract/API:
+  - `tests/test_workflow_api.py`: create/poll/results/artifacts and idempotency behavior.
+- Integration/worker:
+  - `tests/test_land_case_worker.py`: success and failure lifecycle with mocked Bhulekh/eCourts.
+
+### Rollout plan
+- Phase 1 (now): orchestration + extraction + variant generation + civil-first ranking + API + tests.
+- Phase 2: richer English alias/phonetic rules, confidence tuning, stronger threshold controls.
+- Phase 3: Marathi transliteration and bilingual matching parity.
+
+---
+
 ## Current Architecture
 
 ```
@@ -37,6 +144,10 @@ FastAPI  (uvicorn, server.py)
     ├── GET  /api/jobs/{id}     → poll status + progress_pct
     ├── GET  /api/jobs/{id}/cases           → paginated Case rows
     ├── GET  /api/jobs/{id}/cases/export    → CSV download (StreamingResponse)
+    ├── POST /api/workflows/land-case-search
+    ├── GET  /api/workflows/{workflow_id}
+    ├── GET  /api/workflows/{workflow_id}/results
+    ├── GET  /api/workflows/{workflow_id}/artifacts
     └── GET  /api/health        → liveness check (also used for Render cold-start UX)
 
 Background worker (api/worker.py)
@@ -45,6 +156,14 @@ Background worker (api/worker.py)
         ├── Calls HybridECourtsScraper (search_petitioner per year)
         ├── Iterates over years, inserts Case rows per year
         └── Updates job.status / progress_message / years_done after each year
+
+Land-to-cases worker (api/land_case_worker.py)
+    └── run_land_case_workflow(workflow_id)
+        ├── Runs Bhulekh lookup and saves panel-focused verification PDF
+        ├── Extracts occupant + mutation metadata
+        ├── Builds deterministic name variants
+        ├── Executes eCourts 15-year searches across variants
+        └── Ranks/stores civil-first relevant case hits
 
 HybridECourtsScraper (scraper.py)  ← primary scraper
     ├── setup_driver()          → no-op (browser deferred to bootstrap)
@@ -96,8 +215,8 @@ Static frontend
 ### 1. Playwright over Selenium
 **Why:** Playwright is async-native, eliminating the need for `ThreadPoolExecutor`. FastAPI and the scraper both run on the same asyncio event loop. Also has better `wait_for_selector` ergonomics vs Selenium's `WebDriverWait`.
 
-### 2. CAPTCHA via RapidOCR (local inference)
-**Why:** eCourts uses a simple alphanumeric image CAPTCHA (Securimage). Originally used EasyOCR but it pulls PyTorch (~400MB RAM, 35s init), which OOM-killed Chromium on Render's 512MB free tier. Replaced with RapidOCR (ONNX Runtime) — ~130MB RAM, 0.09s init, same ~80-90% accuracy. The `_get_engine()` singleton avoids reloading the model on every request. Up to 5 retries per year with a fresh captcha image each time. ONNX models are pre-downloaded during Docker `build` to avoid a ~60s download on first request.
+### 2. CAPTCHA pipeline: ddddocr-first, RapidOCR fallback
+**Why:** eCourts/Bhulekh captcha quality varies (noise, strike-through, low contrast). We now run `ddddocr` across multiple preprocessing variants (median denoise, Otsu threshold, soft blur, baseline contrast path) and accept the first non-empty alphanumeric result. If all are empty, fallback to RapidOCR remains in place for resilience. RapidOCR still avoids EasyOCR/PyTorch memory pressure on low-memory environments.
 
 ### 3. Never call `go_back()` — AJAX navigation only
 **Why:** The eCourts detail view (`viewHistory()`) is purely AJAX — the URL never changes from `?p=casestatus/index&app_token=`. Calling `go_back()` after viewing a case detail navigates the browser back to the pre-search form page, making `viewHistory` undefined for all subsequent cases. Fix: call `page.evaluate(view_js)` directly with the extracted `onclick` string; the DOM updates in-place, all 8 cases in a year are fetched correctly.
@@ -160,6 +279,29 @@ Detail fields (15 total): `cnr_number`, `case_type`, `filing_number`, `filing_da
 
 Also: `raw_json` (full dict), `created_at`.
 
+### `land_case_workflows`
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID (str) PK | Workflow identifier |
+| `idempotency_key` | String nullable unique | Prevent duplicate submissions |
+| `district_label/taluka_label/village_label` | Text | Input location |
+| `survey_part1/survey_option_label` | Text | Input survey selectors |
+| `status` | String(32) | `pending_input / bhulekh_running / name_variants_ready / ecourts_running / ranked_done / failed` |
+| `progress_message/error_message` | Text nullable | Progress and failure detail |
+| `occupant_primary_name` | Text nullable | Extracted occupant |
+| `mutation_numbers_json` | Text nullable | JSON array of mutation candidates |
+| `extraction_confidence` | Float nullable | 0..1 extraction confidence |
+| `variant_count` | Integer | Generated variant count |
+| `years_total/years_done` | Integer | eCourts sweep progress |
+| `total_hits` | Integer | Ranked relevant hits |
+| `pdf_path/html_path` | Text nullable | Workflow artifacts |
+| `created_at/started_at/finished_at` | DateTime(tz) | UTC |
+
+### `land_entities` / `name_variants` / `workflow_case_hits`
+- `land_entities`: extracted occupant candidate lists, mutation numbers, confidence, and source (`html`/`pdf`).
+- `name_variants`: per-workflow variant text, kind, and quality score.
+- `workflow_case_hits`: ranked case rows including `is_civil`, `name_match_score`, `match_explanation`, and `final_rank`.
+
 ---
 
 ## Scraped Fields Per Case
@@ -212,7 +354,7 @@ Observed timing for "Rajesh Gupta" (59 records, 15 years, headless):
 
 ## Test Coverage
 
-212 tests across 8 files, run with `uv run pytest`. In-memory SQLite (`StaticPool`) for all API/worker tests.
+248 tests across 12 files, run with `uv run pytest`. In-memory SQLite (`StaticPool`) for API/worker tests.
 
 | File | Count | What it covers |
 |---|---|---|
@@ -224,6 +366,10 @@ Observed timing for "Rajesh Gupta" (59 records, 15 years, headless):
 | `test_captcha_solver.py` | ~12 | Image preprocess, token join, temp cleanup, RapidOCR singleton cache |
 | `test_worker.py` | ~12 | Job lifecycle (not-found, running, done, failed), case insertion, `raw_json`, multi-year |
 | `test_hybrid_scraper.py` | ~73 | `ScrapingSession`, bootstrap (PHPSESSID extract, browser teardown, error paths), session TTL, HTTP captcha solve, `_http_search_year` (success, captcha retry, session expiry, exhaustion), `_http_fetch_detail` (viewHistory arg mapping, invalid JS), `search_petitioner` (lazy bootstrap, stale re-bootstrap, expiry recovery), no-op overrides, `close()` safety, parser `html=` bypass |
+| `test_bhulekh_scraper.py` | 4 | Bhulekh `<select>` HTML parsing, label→value lookup, mobile regex, `BhulekhSearchParams` defaults |
+| `test_land_case_flow.py` | 4 | Extraction heuristics, variant generation bounds, fuzzy scoring, civil-first ranking |
+| `test_workflow_api.py` | 4 | Workflow create/poll/results/artifacts contracts + idempotency behavior |
+| `test_land_case_worker.py` | 2 | Land workflow success/failure lifecycle with mocked Bhulekh/eCourts |
 
 Run: `uv run pytest -v`
 
@@ -234,6 +380,7 @@ Run: `uv run pytest -v`
 ```
 icy-disk/
 ├── scraper.py              ECourtsScraper (browser) + HybridECourtsScraper (HTTP)
+├── bhulekh_scraper.py      Maharashtra Bhulekh Playwright scraper (optional CLI only)
 ├── captcha_solver.py       RapidOCR singleton; preprocess + solve
 ├── main.py                 CLI entry point (wraps async with asyncio.run())
 ├── server.py               Reads $PORT; starts uvicorn
@@ -245,12 +392,15 @@ icy-disk/
 ├── api/
 │   ├── app.py              FastAPI factory; CORS; static mount; startup hook
 │   ├── database.py         Async engine; SQLite WAL; postgresql:// URL fix
-│   ├── models.py           SearchJob + Case ORM (SQLAlchemy 2.x Mapped)
-│   ├── schemas.py          Pydantic v2 request/response; progress_pct computed
-│   ├── worker.py           run_scrape_job(); owns full job lifecycle
+│   ├── models.py           SearchJob + Case ORM + LandCase workflow entities
+│   ├── land_case_flow.py   Extraction, name variants, fuzzy scoring/ranking helpers
+│   ├── land_case_worker.py Unified land→Bhulekh→eCourts workflow orchestrator
+│   ├── schemas.py          Pydantic v2 request/response + land workflow contracts
+│   ├── worker.py           run_scrape_job(); owns full eCourts job lifecycle
 │   └── routes/
 │       ├── jobs.py         POST/GET /api/jobs, GET /api/jobs/{id}
-│       └── cases.py        GET .../cases (paginated), GET .../cases/export (CSV)
+│       ├── cases.py        GET .../cases (paginated), GET .../cases/export (CSV)
+│       └── workflows.py    POST/GET land-case workflow endpoints
 │
 ├── static/
 │   ├── index.html
@@ -266,7 +416,10 @@ icy-disk/
     ├── test_scraper_parsing.py
     ├── test_captcha_solver.py
     ├── test_worker.py
-    └── test_hybrid_scraper.py
+    ├── test_hybrid_scraper.py
+    ├── test_land_case_flow.py
+    ├── test_workflow_api.py
+    └── test_land_case_worker.py
 ```
 
 ---

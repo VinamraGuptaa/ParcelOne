@@ -21,6 +21,13 @@ def _make_test_image(path: str, width: int = 120, height: int = 40) -> None:
     img.save(path)
 
 
+def _mock_dddd_empty():
+    """ddddocr runs before RapidOCR; return empty so tests exercise RapidOCR mocks."""
+    mock = MagicMock()
+    mock.classification = lambda b: ""
+    return mock
+
+
 def _mock_engine(texts: list[str]):
     """
     Return a mock RapidOCR instance whose __call__ returns a result list
@@ -126,7 +133,10 @@ class TestSolve:
             src_path = src.name
 
         try:
-            with patch("captcha_solver._get_engine", return_value=_mock_engine(["abc123"])):
+            with (
+                patch("captcha_solver._get_dddd_engine", return_value=_mock_dddd_empty()),
+                patch("captcha_solver._get_engine", return_value=_mock_engine(["abc123"])),
+            ):
                 from captcha_solver import solve
                 result = solve(src_path)
             assert isinstance(result, str)
@@ -139,7 +149,10 @@ class TestSolve:
             src_path = src.name
 
         try:
-            with patch("captcha_solver._get_engine", return_value=_mock_engine(["ab", "cd"])):
+            with (
+                patch("captcha_solver._get_dddd_engine", return_value=_mock_dddd_empty()),
+                patch("captcha_solver._get_engine", return_value=_mock_engine(["ab", "cd"])),
+            ):
                 from captcha_solver import solve
                 result = solve(src_path)
             assert result == "abcd"
@@ -152,7 +165,10 @@ class TestSolve:
             src_path = src.name
 
         try:
-            with patch("captcha_solver._get_engine", return_value=_mock_engine(["ab cd"])):
+            with (
+                patch("captcha_solver._get_dddd_engine", return_value=_mock_dddd_empty()),
+                patch("captcha_solver._get_engine", return_value=_mock_engine(["ab cd"])),
+            ):
                 from captcha_solver import solve
                 result = solve(src_path)
             assert " " not in result
@@ -165,7 +181,10 @@ class TestSolve:
             src_path = src.name
 
         try:
-            with patch("captcha_solver._get_engine", return_value=_mock_engine([])):
+            with (
+                patch("captcha_solver._get_dddd_engine", return_value=_mock_dddd_empty()),
+                patch("captcha_solver._get_engine", return_value=_mock_engine([])),
+            ):
                 from captcha_solver import solve
                 result = solve(src_path)
             assert result == ""
@@ -179,7 +198,10 @@ class TestSolve:
 
         processed_path = src_path.replace(".png", "_processed.png")
         try:
-            with patch("captcha_solver._get_engine", return_value=_mock_engine(["xyz"])):
+            with (
+                patch("captcha_solver._get_dddd_engine", return_value=_mock_dddd_empty()),
+                patch("captcha_solver._get_engine", return_value=_mock_engine(["xyz"])),
+            ):
                 from captcha_solver import solve
                 solve(src_path)
             assert not os.path.exists(processed_path)
@@ -195,7 +217,10 @@ class TestSolve:
             src_path = src.name
 
         try:
-            with patch("captcha_solver._get_engine", return_value=_mock_engine(["A3!X#9"])):
+            with (
+                patch("captcha_solver._get_dddd_engine", return_value=_mock_dddd_empty()),
+                patch("captcha_solver._get_engine", return_value=_mock_engine(["A3!X#9"])),
+            ):
                 from captcha_solver import solve
                 result = solve(src_path)
             assert result == "A3X9"
