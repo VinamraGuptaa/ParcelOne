@@ -50,6 +50,7 @@ RUN pip install uv --no-cache-dir && \
     uv run pip install --force-reinstall opencv-python-headless
 
 # Install Playwright's Chromium browser
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers
 RUN uv run playwright install chromium
 
 # Pre-download RapidOCR ONNX models so they're cached in the image.

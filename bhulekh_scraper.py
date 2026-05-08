@@ -824,6 +824,25 @@ class BhulekhScraper:
                 _debug_log("H3", "captcha_text_empty_retry", {"attempt": attempt})
                 await self._refresh_captcha()
                 continue
+            try:
+                import captcha_solver
+
+                if not captcha_solver.is_plausible_captcha(captcha_text):
+                    logger.warning(
+                        "Rejecting implausible captcha OCR output before submit: %r (len=%s)",
+                        captcha_text,
+                        len(captcha_text),
+                    )
+                    _debug_log(
+                        "H3",
+                        "captcha_text_implausible_retry",
+                        {"attempt": attempt, "text_len": len(captcha_text or "")},
+                    )
+                    await self._refresh_captcha()
+                    continue
+            except Exception:
+                # If heuristic check fails unexpectedly, do not block submission path.
+                pass
             await self.page.fill(TXT_CAPTCHA, captcha_text)
             await self._dismiss_result_overlay()
             before_submit_html = await self.page.content()

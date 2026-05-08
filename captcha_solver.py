@@ -5,6 +5,7 @@ Uses ddddocr when available, then RapidOCR (ONNX Runtime) as fallback.
 
 import json
 import logging
+import os
 import re
 import time
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
@@ -58,6 +59,40 @@ def _get_dddd_engine():
 def _clean_text(text: str) -> str:
     text = re.sub(r"\s+", "", text or "")
     return re.sub(r"[^A-Za-z0-9]", "", text)
+
+
+CAPTCHA_MIN_LEN = int(os.getenv("CAPTCHA_MIN_LEN", "4"))
+CAPTCHA_MAX_LEN = int(os.getenv("CAPTCHA_MAX_LEN", "7"))
+
+
+def is_plausible_captcha(text: str) -> bool:
+    """Heuristic filter to reject obvious OCR junk before form submit."""
+    cleaned = _clean_text(text)
+    if not cleaned:
+        return False
+    n = len(cleaned)
+    if n < CAPTCHA_MIN_LEN or n > CAPTCHA_MAX_LEN:
+        return False
+    # Reject degenerate outputs like "hhhhh" that often come from blurred glyphs.
+    uniq = len(set(cleaned.lower()))
+    if uniq <= 1:
+        return False
+    return True
+
+
+def _captcha_score(text: str) -> int:
+    """
+    Rank candidate quality; higher is better.
+    Heuristic only: strong length fit + diversity.
+    """
+    cleaned = _clean_text(text)
+    if not cleaned:
+        return -10_000
+    if not is_plausible_captcha(cleaned):
+        return -1_000 + len(cleaned)
+    uniq = len(set(cleaned.lower()))
+    # Prefer lengths near 6 and richer character diversity.
+    return 1_000 - abs(len(cleaned) - 6) * 10 + uniq
 
 
 def _otsu_threshold(gray: Image.Image) -> int:
@@ -225,6 +260,8 @@ def solve(image_path: str, mode: str = "auto") -> str:
     temp_paths: list[str] = []
     debug_path = "/tmp/ecourts_captcha_debug.png"
 
+    best_candidate = ""
+    best_score = -10_000
     try:
         for name, hid, fn in variant_specs:
             im = fn(base.copy())
@@ -247,10 +284,16 @@ def solve(image_path: str, mode: str = "auto") -> str:
                 )
                 _debug_log(hid, "dddd_variant_result", {"variant": name, "blob_len": len(blob), "text_len": len(dddd_text)})
                 if dddd_text:
-                    shutil.copy(p, debug_path)
-                    logger.info("captcha solved by ddddocr variant=%s text=%r", name, dddd_text)
-                    _debug_log("H2", "dddd_selected", {"variant": name, "text_len": len(dddd_text)})
-                    return dddd_text
+                    score = _captcha_score(dddd_text)
+                    _debug_log(
+                        hid,
+                        "dddd_candidate_scored",
+                        {"variant": name, "text_len": len(dddd_text), "score": score},
+                    )
+                    if score > best_score:
+                        best_score = score
+                        best_candidate = dddd_text
+                        shutil.copy(p, debug_path)
             except Exception as e:
                 logger.debug("ddddocr variant failed: variant=%s err=%s", name, type(e).__name__)
                 _debug_log(hid, "dddd_variant_error", {"variant": name, "error": type(e).__name__})
@@ -261,16 +304,32 @@ def solve(image_path: str, mode: str = "auto") -> str:
         engine = _get_engine()
         result, _ = engine(processed_path)
 
-        if not result:
+        if result:
+            text = "".join(item[1] for item in result)
+            cleaned = _clean_text(text)
+            score = _captcha_score(cleaned)
+            _debug_log("H2", "rapidocr_candidate_scored", {"text_len": len(cleaned), "score": score})
+            if score > best_score:
+                best_score = score
+                best_candidate = cleaned
+        else:
             logger.warning("captcha OCR returned empty text after ddddocr + RapidOCR fallback")
             _debug_log("H2", "rapidocr_empty", {})
+
+        if not best_candidate:
+            return ""
+        if not is_plausible_captcha(best_candidate):
+            logger.warning(
+                "captcha OCR produced only implausible candidates; best=%r len=%s",
+                best_candidate,
+                len(best_candidate),
+            )
+            _debug_log("H2", "ocr_implausible_best", {"text_len": len(best_candidate), "score": best_score})
             return ""
 
-        text = "".join(item[1] for item in result)
-        cleaned = _clean_text(text)
-        logger.info("captcha solved by RapidOCR fallback text=%r", cleaned)
-        _debug_log("H2", "rapidocr_selected", {"text_len": len(cleaned)})
-        return cleaned
+        logger.info("captcha solved (best-candidate) text=%r score=%s", best_candidate, best_score)
+        _debug_log("H2", "ocr_best_selected", {"text_len": len(best_candidate), "score": best_score})
+        return best_candidate
     finally:
         import os as _os
 
