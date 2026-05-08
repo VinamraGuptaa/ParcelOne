@@ -66,9 +66,6 @@ EXPOSE 8000
 
 ENV PYTHONUNBUFFERED=1
 ENV DEV=0
-# ddddocr produces single-character junk on Linux x86_64 Docker for Bhulekh
-# captchas; RapidOCR ONNX is pre-baked and platform-stable.
-ENV CAPTCHA_SOLVER_MODE=rapidocr_only
 ENV ECOURTS_API_SEARCH_PAGE_SIZE=20
 ENV ECOURTS_API_CASE_STATUSES=PENDING
 ENV ECOURTS_API_JUDICIAL_SECTIONS=CIV
