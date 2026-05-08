@@ -64,6 +64,12 @@ def _clean_text(text: str) -> str:
 CAPTCHA_MIN_LEN = int(os.getenv("CAPTCHA_MIN_LEN", "4"))
 CAPTCHA_MAX_LEN = int(os.getenv("CAPTCHA_MAX_LEN", "7"))
 
+# Set CAPTCHA_SOLVER_MODE=rapidocr_only in deployed containers to skip ddddocr
+# entirely.  ddddocr is unreliable on Linux x86_64 Docker (model trained mainly
+# on Chinese-style captchas) and can produce single-character junk ('h', 'hh').
+# RapidOCR ONNX is baked into the Docker image and platform-stable.
+CAPTCHA_SOLVER_MODE = os.getenv("CAPTCHA_SOLVER_MODE", "auto")
+
 
 def is_plausible_captcha(text: str) -> bool:
     """Heuristic filter to reject obvious OCR junk before form submit."""
@@ -202,7 +208,6 @@ def preprocess_image(image_path: str, output_path: str = None) -> str:
 
 
 def _solve_with_rapidocr_only(image_path: str) -> str:
-    import os
     import shutil
 
     processed_path = preprocess_image(image_path)
@@ -211,6 +216,11 @@ def _solve_with_rapidocr_only(image_path: str) -> str:
 
     engine = _get_engine()
     result, _ = engine(processed_path)
+    try:
+        os.remove(processed_path)
+    except OSError:
+        pass
+
     if not result:
         logger.warning("captcha OCR returned empty text in RapidOCR-only mode")
         _debug_log("H2", "rapidocr_only_empty", {})
@@ -218,12 +228,16 @@ def _solve_with_rapidocr_only(image_path: str) -> str:
 
     text = "".join(item[1] for item in result)
     cleaned = _clean_text(text)
+
+    if not is_plausible_captcha(cleaned):
+        logger.warning(
+            "RapidOCR-only produced implausible result: %r (len=%s)", cleaned, len(cleaned)
+        )
+        _debug_log("H2", "rapidocr_only_implausible", {"text_len": len(cleaned)})
+        return ""
+
     logger.info("captcha solved by RapidOCR-only mode text=%r", cleaned)
     _debug_log("H2", "rapidocr_only_selected", {"text_len": len(cleaned)})
-    try:
-        os.remove(processed_path)
-    except OSError:
-        pass
     return cleaned
 
 
@@ -242,10 +256,16 @@ def solve(image_path: str, mode: str = "auto") -> str:
     import shutil
     import tempfile
 
-    logger.debug("captcha solve start: image=%s mode=%s", os.path.basename(image_path), mode)
-    _debug_log("H1", "solve_start", {"image": os.path.basename(image_path)})
+    effective_mode = CAPTCHA_SOLVER_MODE if mode == "auto" else mode
+    logger.debug(
+        "captcha solve start: image=%s mode=%s effective=%s",
+        os.path.basename(image_path),
+        mode,
+        effective_mode,
+    )
+    _debug_log("H1", "solve_start", {"image": os.path.basename(image_path), "mode": effective_mode})
 
-    if mode == "rapidocr_only":
+    if effective_mode == "rapidocr_only":
         return _solve_with_rapidocr_only(image_path)
 
     base = Image.open(image_path).convert("RGB")

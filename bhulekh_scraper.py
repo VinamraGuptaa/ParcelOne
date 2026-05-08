@@ -637,6 +637,44 @@ class BhulekhScraper:
                 await img.screenshot(path=path)
                 _debug_log("H1", "captcha_element_screenshot_used", {})
 
+            # Guard: a captcha image < 3 KB is almost certainly a loading
+            # placeholder or broken data-URL, not the real captcha.  Wait up
+            # to 3 s for the src to change to a properly-sized image.
+            MIN_CAPTCHA_BYTES = 3000
+            file_bytes = Path(path).stat().st_size
+            if file_bytes < MIN_CAPTCHA_BYTES:
+                logger.warning(
+                    "Captcha image too small (%d bytes < %d); waiting for real image.",
+                    file_bytes,
+                    MIN_CAPTCHA_BYTES,
+                )
+                _debug_log("H1", "captcha_image_too_small_wait", {"byte_len": file_bytes})
+                waited = 0.0
+                while waited < 3.0:
+                    await asyncio.sleep(0.4)
+                    waited += 0.4
+                    new_src = await img.get_attribute("src")
+                    if new_src and new_src != src:
+                        logger.info("Captcha src changed after %.1fs; re-capturing.", waited)
+                        if new_src.strip().lower().startswith("data:"):
+                            nm = re.match(
+                                r"^data:(?P<mime>[^;]+);base64,(?P<data>.+)$",
+                                new_src.strip(),
+                                flags=re.DOTALL,
+                            )
+                            if nm:
+                                try:
+                                    raw2 = base64.b64decode(nm.group("data").replace("\n", ""))
+                                    Path(path).write_bytes(raw2)
+                                    file_bytes = len(raw2)
+                                except Exception:
+                                    pass
+                        if file_bytes >= MIN_CAPTCHA_BYTES:
+                            break
+                if file_bytes < MIN_CAPTCHA_BYTES:
+                    _debug_log("H1", "captcha_image_still_small_abort", {"byte_len": file_bytes})
+                    return None
+
             text = captcha_solver.solve(path)
             logger.info("Bhulekh captcha OCR: %r", text)
             _debug_log("H2", "captcha_ocr_result", {"text_len": len(text or "")})
