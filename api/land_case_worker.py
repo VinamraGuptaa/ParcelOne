@@ -249,6 +249,36 @@ def _split_owner_names(owner_name_input: str) -> list[str]:
     return list(dict.fromkeys(parts))
 
 
+# Words that indicate a Bhulekh field label or land description rather than a
+# person/entity name.  Candidates containing any of these are skipped when
+# building the eCourts search list.
+_NON_NAME_TOKENS = frozenset([
+    "irrigated", "non", "crop", "area", "details", "survey", "field",
+    "total", "possession", "land", "record", "khata", "plot", "khasra",
+    "gat", "block", "village", "taluka", "district", "boundary",
+    "east", "west", "north", "south",
+])
+
+
+def _is_plausible_ecourts_name(name: str) -> bool:
+    """Return True only if *name* looks like a searchable person/entity name."""
+    # Strip trailing '--' delimiter artifact common in Bhulekh/IGR data.
+    cleaned = name.rstrip("-").strip()
+    if not cleaned:
+        return False
+    words = cleaned.lower().split()
+    # Too few words → likely a single token label, not a name.
+    if len(words) < 2:
+        return False
+    # Too many words → likely a company description (e.g. 'माय लँन्ड … तर्फे भागीदार …').
+    if len(words) > 6:
+        return False
+    # Contains land-record descriptor tokens → not a person name.
+    if _NON_NAME_TOKENS.intersection(words):
+        return False
+    return True
+
+
 def _split_party_name_blob(value: str) -> list[str]:
     """
     Split IGR party-name blobs (often wrapped with braces/quotes) into names.
@@ -740,7 +770,9 @@ async def run_land_case_workflow(workflow_id: str) -> None:
         owner_source = "input"
         if not owner_names_for_api:
             owner_names_for_api = [
-                n.strip() for n in (entity.occupant_candidates or []) if isinstance(n, str) and n.strip()
+                n.strip()
+                for n in (entity.occupant_candidates or [])
+                if isinstance(n, str) and n.strip() and _is_plausible_ecourts_name(n)
             ]
             owner_source = "bhulekh_candidates"
         if not owner_names_for_api and entity.occupant_primary_name:
@@ -755,7 +787,9 @@ async def run_land_case_workflow(workflow_id: str) -> None:
                     igr_purchaser_names.extend(_split_party_name_blob(value))
 
         if igr_purchaser_names:
-            owner_names_for_api.extend(igr_purchaser_names)
+            owner_names_for_api.extend(
+                n for n in igr_purchaser_names if _is_plausible_ecourts_name(n)
+            )
             owner_source = f"{owner_source}+igr_purchasers"
 
         owner_names_for_api = list(dict.fromkeys(owner_names_for_api))
