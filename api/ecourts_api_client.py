@@ -320,14 +320,15 @@ class EcourtsApiClient:
     ) -> list[dict]:
         # Use general-party search on partner API so we are not limited
         # to petitioner-only matches.
+        # caseStatuses / judicialSections are opt-in: only sent when explicitly
+        # set in env so the minimal request matches the documented example.
         case_statuses = _split_csv_env(os.getenv("ECOURTS_API_CASE_STATUSES", "PENDING"))
-        judicial_sections = _split_csv_env(os.getenv("ECOURTS_API_JUDICIAL_SECTIONS", "CIV"))
+        judicial_sections = _split_csv_env(os.getenv("ECOURTS_API_JUDICIAL_SECTIONS", ""))
         case_types = _split_csv_env(os.getenv("ECOURTS_API_CASE_TYPES", ""))
         params: list[tuple[str, Any]] = [
             ("page", 1),
             ("pageSize", int(os.getenv("ECOURTS_API_SEARCH_PAGE_SIZE", "20"))),
         ]
-        # Reduce detail-call volume/cost by narrowing search candidates.
         for status in case_statuses:
             params.append(("caseStatuses", status))
         for section in judicial_sections:
