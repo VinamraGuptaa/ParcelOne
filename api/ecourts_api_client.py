@@ -322,7 +322,7 @@ class EcourtsApiClient:
         # to petitioner-only matches.
         # caseStatuses / judicialSections are opt-in: only sent when explicitly
         # set in env so the minimal request matches the documented example.
-        case_statuses = _split_csv_env(os.getenv("ECOURTS_API_CASE_STATUSES", "PENDING"))
+        case_statuses = _split_csv_env(os.getenv("ECOURTS_API_CASE_STATUSES", ""))
         judicial_sections = _split_csv_env(os.getenv("ECOURTS_API_JUDICIAL_SECTIONS", ""))
         case_types = _split_csv_env(os.getenv("ECOURTS_API_CASE_TYPES", ""))
         params: list[tuple[str, Any]] = [

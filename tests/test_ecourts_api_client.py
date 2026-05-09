@@ -59,7 +59,7 @@ async def test_request_metrics_cost_accumulates(monkeypatch):
     assert c.metrics.detail_requests == 1
     assert c.metrics.estimated_cost_inr == 0.7
     assert ("litigants", "abc") in seen_params
-    assert ("caseStatuses", "PENDING") in seen_params
+    assert all(k != "caseStatuses" for k, _ in seen_params), "caseStatuses should not be sent by default"
     assert all(k != "judicialSections" for k, _ in seen_params), "judicialSections should not be sent by default"
     assert c.metrics.request_log[0]["method"] == "GET"
     assert ("litigants", "abc") in c.metrics.request_log[0]["request_params"]

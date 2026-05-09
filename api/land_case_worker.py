@@ -253,10 +253,16 @@ def _split_owner_names(owner_name_input: str) -> list[str]:
 # person/entity name.  Candidates containing any of these are skipped when
 # building the eCourts search list.
 _NON_NAME_TOKENS = frozenset([
-    "irrigated", "non", "crop", "area", "details", "survey", "field",
-    "total", "possession", "land", "record", "khata", "plot", "khasra",
-    "gat", "block", "village", "taluka", "district", "boundary",
+    # Land/agriculture descriptors
+    "irrigated", "non", "crop", "area", "unit", "details", "survey",
+    "field", "total", "possession", "land", "record", "khata", "plot",
+    "khasra", "gat", "block", "village", "taluka", "district", "boundary",
+    # Compass directions (often appear as plot boundary labels)
     "east", "west", "north", "south",
+    # Legal/administrative labels that appear verbatim in 7/12 other-occupant list
+    "assessment", "purpose", "legal", "notforlegal", "notfor",
+    "special", "nil", "vacant", "encumbrance", "revenue", "government",
+    "owner", "occupant", "tenant", "holder", "patta",
 ])
 
 
@@ -332,6 +338,7 @@ def _write_ranked_hits_csv(workflow_id: str, hits: list[Any], artifacts_dir: Pat
     out = artifacts_dir / f"{workflow_id}_ranked_hits.csv"
     fieldnames = [
         "final_rank",
+        "primary_name_matched",
         "search_year",
         "case_id",
         "cnr_number",
@@ -350,6 +357,7 @@ def _write_ranked_hits_csv(workflow_id: str, hits: list[Any], artifacts_dir: Pat
             writer.writerow(
                 {
                     "final_rank": idx,
+                    "primary_name_matched": getattr(hit, "primary_name_matched", ""),
                     "search_year": hit.search_year,
                     "case_id": hit.case_id,
                     "cnr_number": hit.cnr_number,
@@ -360,6 +368,62 @@ def _write_ranked_hits_csv(workflow_id: str, hits: list[Any], artifacts_dir: Pat
                     "name_match_score": hit.name_match_score,
                     "matched_variant": hit.matched_variant,
                     "match_explanation": hit.match_explanation,
+                }
+            )
+    return out
+
+
+def _write_unranked_csv(
+    workflow_id: str,
+    records: list[dict],
+    bhulekh_names: list[str],
+    igr_names: list[str],
+    artifacts_dir: Path,
+) -> Path:
+    """Write raw normalized API records before any ranking or filtering."""
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    out = artifacts_dir / f"{workflow_id}_unranked_raw.csv"
+    fieldnames = [
+        "row_index",
+        "bhulekh_names_searched",
+        "igr_names_searched",
+        "cnr",
+        "caseType",
+        "caseStatus",
+        "filingNumber",
+        "filingDate",
+        "courtName",
+        "petitioners",
+        "respondents",
+        "nextHearingDate",
+        "decisionDate",
+        "stateCode",
+        "districtCode",
+    ]
+    bhulekh_str = " | ".join(bhulekh_names)
+    igr_str = " | ".join(igr_names)
+    with out.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for idx, rec in enumerate(records, start=1):
+            canon = _canonicalize_ecourts_case_record(rec)
+            writer.writerow(
+                {
+                    "row_index": idx,
+                    "bhulekh_names_searched": bhulekh_str,
+                    "igr_names_searched": igr_str,
+                    "cnr": canon.get("cnr") or canon.get("cnr_number") or canon.get("CNR_Number"),
+                    "caseType": canon.get("caseType"),
+                    "caseStatus": canon.get("caseStatus"),
+                    "filingNumber": canon.get("filingNumber"),
+                    "filingDate": canon.get("filingDate"),
+                    "courtName": canon.get("courtName"),
+                    "petitioners": "; ".join(canon.get("petitioners") or []),
+                    "respondents": "; ".join(canon.get("respondents") or []),
+                    "nextHearingDate": canon.get("nextHearingDate"),
+                    "decisionDate": canon.get("decisionDate"),
+                    "stateCode": canon.get("stateCode"),
+                    "districtCode": canon.get("districtCode"),
                 }
             )
     return out
@@ -768,16 +832,20 @@ async def run_land_case_workflow(workflow_id: str) -> None:
         owner_name_input = (wf.owner_name_input or "").strip()
         owner_names_for_api = _split_owner_names(owner_name_input)
         owner_source = "input"
+        if not owner_names_for_api and entity.occupant_primary_name:
+            # Prefer the primary 7/12 occupant name — it is the single most
+            # reliable name extracted by the Bhulekh scraper.
+            owner_names_for_api = [entity.occupant_primary_name.strip()]
+            owner_source = "bhulekh_primary"
         if not owner_names_for_api:
+            # Fall back to full candidate list only when primary is absent,
+            # filtering out Bhulekh field labels and land descriptors.
             owner_names_for_api = [
                 n.strip()
                 for n in (entity.occupant_candidates or [])
                 if isinstance(n, str) and n.strip() and _is_plausible_ecourts_name(n)
             ]
             owner_source = "bhulekh_candidates"
-        if not owner_names_for_api and entity.occupant_primary_name:
-            owner_names_for_api = [entity.occupant_primary_name.strip()]
-            owner_source = "bhulekh_primary"
 
         # Preserve the 7/12 Bhulekh names before IGR names are appended so
         # the ranker can prioritise 7/12 matches over IGR purchaser matches.
@@ -935,6 +1003,24 @@ async def run_land_case_workflow(workflow_id: str) -> None:
                             ),
                         )
                         search_rows.extend(owner_rows)
+
+                    # Write unranked CSV immediately after search so raw
+                    # normalized API data is always available for debugging.
+                    try:
+                        _write_unranked_csv(
+                            workflow_id,
+                            search_rows,
+                            bhulekh_names=bhulekh_owner_names,
+                            igr_names=igr_purchaser_names,
+                            artifacts_dir=Path("artifacts/workflows"),
+                        )
+                    except Exception as _exc:
+                        logger.warning(
+                            "[workflow:%s] Unranked CSV export failed: %s",
+                            workflow_id,
+                            type(_exc).__name__,
+                        )
+
                     detail_limit = int(os.getenv("ECOURTS_API_DETAIL_LIMIT", "20"))
                     detail_concurrency = max(1, int(os.getenv("ECOURTS_API_DETAIL_CONCURRENCY", "1")))
                     sem = asyncio.Semaphore(detail_concurrency)

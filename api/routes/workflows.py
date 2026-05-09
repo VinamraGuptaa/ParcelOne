@@ -96,6 +96,7 @@ ARTIFACTS_ROOT = Path("artifacts/workflows").resolve()
 ARTIFACT_KINDS: dict[str, tuple[str, str, str]] = {
     "pdf": ("_land_record.pdf", "application/pdf", "land_record.pdf"),
     "csv": ("_ranked_hits.csv", "text/csv", "ranked_hits.csv"),
+    "unranked_csv": ("_unranked_raw.csv", "text/csv", "unranked_raw.csv"),
     "html": ("_submitted.html", "text/html", "submitted.html"),
 }
 
