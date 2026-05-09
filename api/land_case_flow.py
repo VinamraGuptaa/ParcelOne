@@ -76,6 +76,7 @@ class RankedCaseHit:
     matched_variant: str | None
     match_explanation: str
     raw_json: str
+    primary_name_matched: bool = False
 
 
 def _normalize_name(name: str) -> str:
@@ -518,6 +519,7 @@ def rank_api_case_hits(
     *,
     owner_name: str,
     owner_names: list[str] | None = None,
+    primary_owner_names: list[str] | None = None,
     igr_party_names: list[str],
     district_label: str = "",
     taluka_label: str = "",
@@ -640,11 +642,36 @@ def rank_api_case_hits(
     if not owner_variants and owner_name:
         owner_variants = [owner_name]
     owner_variants = list(dict.fromkeys(owner_variants))
+
+    # Primary names = 7/12 Bhulekh occupant names (highest priority).
+    # Fall back to all owner variants when not explicitly provided.
+    primary_variants = [o.strip() for o in (primary_owner_names or []) if isinstance(o, str) and o.strip()]
+    if not primary_variants:
+        primary_variants = owner_variants
+
+    # Secondary names = IGR purchaser names only (names in owner_variants but
+    # not in primary_variants).
+    primary_set = set(primary_variants)
+    secondary_variants = [o for o in owner_variants if o not in primary_set]
+
     out: list[RankedCaseHit] = []
     for original in records:
         rec = _canonicalize_case_record(original)
         parties = _party_text_from_api_record(rec)
-        owner_score, matched_owner, reason = score_case_against_variants(parties, owner_variants)
+
+        # Score against 7/12 names and IGR names separately.
+        primary_score, matched_owner, reason = score_case_against_variants(parties, primary_variants)
+        secondary_score = 0.0
+        if secondary_variants:
+            secondary_score, sec_match, sec_reason = score_case_against_variants(parties, secondary_variants)
+            if secondary_score > primary_score:
+                matched_owner = matched_owner or sec_match
+                reason = reason if primary_score >= 0.5 else sec_reason
+
+        # Overall owner score = best of primary + partial credit from secondary.
+        owner_score = max(primary_score, secondary_score * 0.6)
+        primary_name_matched = primary_score >= 0.5
+
         owner_match_count = 0
         for owner in owner_variants:
             o_score, _, _ = score_case_against_variants(parties, [owner])
@@ -655,6 +682,7 @@ def rank_api_case_hits(
         owner_match_boost = 0.0
         if owner_total > 0:
             owner_match_boost = 0.08 if all_owner_match else 0.03 * (owner_match_count / owner_total)
+
         party_score = _party_overlap_score(parties, igr_party_names)
         court = (
             rec.get("court")
@@ -671,7 +699,7 @@ def rank_api_case_hits(
             village_label=village_label,
         )
         final_score = round(
-            owner_score * 0.52 + party_score * 0.25 + location_score * 0.23 + owner_match_boost,
+            primary_score * 0.45 + secondary_score * 0.07 + party_score * 0.25 + location_score * 0.23 + owner_match_boost,
             4,
         )
         if final_score < min_score:
@@ -681,8 +709,6 @@ def rank_api_case_hits(
         pending = is_pending_case(case_status)
         out.append(
             RankedCaseHit(
-                # Keep a stable fallback so API rows always have a visible case identifier.
-                # This improves CSV usefulness when provider omits legacy fields.
                 case_id=(
                     rec.get("case_id")
                     or rec.get("caseNumber")
@@ -700,8 +726,10 @@ def rank_api_case_hits(
                 owner_match_count=owner_match_count,
                 owner_total=owner_total,
                 matched_variant=matched_owner,
+                primary_name_matched=primary_name_matched,
                 match_explanation=(
-                    f"{reason};owner_matches={owner_match_count}/{owner_total};"
+                    f"{reason};primary_score={primary_score:.2f};secondary_score={secondary_score:.2f};"
+                    f"owner_matches={owner_match_count}/{owner_total};"
                     f"owner_match_scope={'all' if all_owner_match else 'partial'};"
                     f"igr_party_overlap={party_score:.2f};"
                     f"district_court_overlap={district_score:.2f};pending={pending}"
@@ -712,6 +740,7 @@ def rank_api_case_hits(
         )
     out.sort(
         key=lambda h: (
+            not h.primary_name_matched,                                          # 7/12 match first
             not (h.owner_total > 1 and h.owner_match_count == h.owner_total),
             -(h.owner_match_count / h.owner_total) if h.owner_total else 0.0,
             not h.is_civil,

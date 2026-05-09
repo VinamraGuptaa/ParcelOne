@@ -779,6 +779,10 @@ async def run_land_case_workflow(workflow_id: str) -> None:
             owner_names_for_api = [entity.occupant_primary_name.strip()]
             owner_source = "bhulekh_primary"
 
+        # Preserve the 7/12 Bhulekh names before IGR names are appended so
+        # the ranker can prioritise 7/12 matches over IGR purchaser matches.
+        bhulekh_owner_names: list[str] = list(owner_names_for_api)
+
         igr_purchaser_names: list[str] = []
         for row in igr_collected:
             for key in ("purchaser_name", "Purchaser Name", "PurchaserName"):
@@ -1177,6 +1181,7 @@ async def run_land_case_workflow(workflow_id: str) -> None:
             collected,
             owner_name=owner_name,
             owner_names=owner_names_for_api,
+            primary_owner_names=bhulekh_owner_names,
             igr_party_names=igr_party_names,
             district_label=wf.district_label,
             taluka_label=wf.taluka_label,
