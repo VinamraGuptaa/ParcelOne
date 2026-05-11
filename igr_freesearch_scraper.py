@@ -78,14 +78,45 @@ def _sanitize_label_input(value: str) -> str:
 
 
 class IGRFreeSearchScraper:
-    def __init__(self, headless: bool = True):
+    def __init__(self, headless: bool = True, shared_browser: Optional[Browser] = None):
         self.headless = headless
+        # When set, this scraper borrows an already-running browser process.
+        # setup_driver() will skip launching a new process and just open a new
+        # BrowserContext on it.  close() will not shut down the browser.
+        self._shared_browser = shared_browser
         self._playwright = None
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
 
     async def setup_driver(self) -> None:
+        # ── Shared-browser fast path ──────────────────────────────────────────
+        # When a browser process is supplied externally (e.g. a second parallel
+        # context sharing the primary's process), skip playwright startup and
+        # browser launch entirely — just open a fresh isolated BrowserContext.
+        if self._shared_browser is not None:
+            self.browser = self._shared_browser
+            try:
+                self.context = await self.browser.new_context(
+                    viewport={"width": 1280, "height": 800},
+                    user_agent=(
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                )
+                self.page = await self.context.new_page()
+            except Exception:
+                self.browser = None
+                raise
+            self.page.on("dialog", lambda d: asyncio.create_task(d.dismiss()))
+            await self._navigate_to_portal()
+            await asyncio.sleep(1.0)
+            await self._close_startup_popup()
+            await self._switch_to_rest_of_maharashtra_tab()
+            logger.info("IGR scraper ready (shared browser, new context).")
+            return
+        # ── Full launch path (owns its own browser process) ───────────────────
         def _resolve_chromium_executable() -> str | None:
             explicit = (os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH") or "").strip()
             if explicit and Path(explicit).exists():
@@ -355,12 +386,16 @@ class IGRFreeSearchScraper:
                 pass
             self.context = None
         self.page = None
-        if self.browser:
-            await self.browser.close()
+        if self._shared_browser is not None:
+            # Browser is externally owned — only drop our reference, do not close it.
             self.browser = None
-        if self._playwright:
-            await self._playwright.stop()
-            self._playwright = None
+        else:
+            if self.browser:
+                await self.browser.close()
+                self.browser = None
+            if self._playwright:
+                await self._playwright.stop()
+                self._playwright = None
         logger.info("IGR scraper closed.")
 
     async def _close_popups_best_effort(self) -> None:

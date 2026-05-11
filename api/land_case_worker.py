@@ -108,19 +108,84 @@ def _normalize_text(value: str) -> str:
     return " ".join((value or "").strip().lower().split())
 
 
+# Words that follow a plain number and indicate it is an AREA measurement,
+# not a Gat/survey identifier.  Used to avoid false-positive survey matches.
+_AREA_UNIT_TOKENS = frozenset([
+    "चौरस", "चौ", "sq", "sqft", "sqm", "square", "feet", "foot",
+    "फूट", "फुट", "मीटर", "meter", "metre", "हेक्टर", "hectare", "acre",
+])
+
+# Marathi / transliterated keywords for Gat-number labels in IGR descriptions.
+# IGR uses patterns like: "गट नंबर 1530 हिस्सा नंबर 3"
+_GAT_LABEL = r"(?:गट|gut|gat)\s*(?:नंबर|नं\.?|क्र\.?|क्रं\.?|no\.?|num\.?|number)?"
+_HISSA_LABEL = r"(?:हिस्सा|हिस्से|hissa|हि\.?|ह\.?)\s*(?:नंबर|नं\.?|क्र\.?|क्रं\.?|no\.?|num\.?|number)?"
+
+
 def _contains_exact_survey_token(text: str, survey_token: str) -> bool:
     """
-    Match survey token as a standalone token, not a substring of another number.
-    Examples: `7/1` matches `... 7/1 ...` but not `77/1` or `7/10`.
+    Match a survey/Gat token inside an IGR Property Description.
+
+    Handles all real-world formats observed in Maharashtra IGR data:
+      1. Slash notation:      "1530/3"
+      2. Spaced slash:        "1530 / 3"
+      3. Marathi Gat+Hissa:   "गट नंबर 1530 हिस्सा नंबर 3"
+      4. Abbreviated Marathi: "गट क्र. 1530 हिस्सा क्र. 3"
+      5. English labels:      "Gut No. 1530 Hissa No. 3"
+
+    Avoids false positives when the number appears as an area measurement
+    (e.g. "1530 चौरस फूट" must NOT match survey 1530).
     """
     hay = _normalize_text(text)
     toks = _survey_token_variants(survey_token)
     if not hay or not toks:
         return False
+
+    # ── 1. Exact slash-notation token (e.g. "1530/3") ────────────────────────
     for tok in toks:
-        pattern = re.compile(rf"(?<![0-9a-z\u0900-\u097f]){re.escape(tok)}(?![0-9a-z\u0900-\u097f])", re.IGNORECASE)
+        pattern = re.compile(
+            rf"(?<![0-9a-z\u0900-\u097f]){re.escape(tok)}(?![0-9a-z\u0900-\u097f])",
+            re.IGNORECASE,
+        )
         if pattern.search(hay):
             return True
+
+    # ── Extended formats only apply when token contains a sub-number ─────────
+    if "/" not in survey_token:
+        return False
+
+    base, _, hissa = survey_token.partition("/")
+    base = base.strip()
+    hissa = hissa.strip()
+    if not base or not hissa:
+        return False
+
+    # Guard: base number must NOT be followed by an area unit word.
+    # "1530 चौरस फूट" is area in sq ft, NOT a Gat number.
+    area_false_positive = re.compile(
+        rf"(?<![0-9]){re.escape(base)}\s+({'|'.join(re.escape(u) for u in _AREA_UNIT_TOKENS)})",
+        re.IGNORECASE | re.UNICODE,
+    )
+
+    # ── 2. Spaced slash: "1530 / 3" ──────────────────────────────────────────
+    spaced = re.compile(
+        rf"(?<![0-9]){re.escape(base)}\s*/\s*{re.escape(hissa)}(?![0-9])",
+        re.IGNORECASE,
+    )
+    m = spaced.search(hay)
+    if m and not area_false_positive.search(hay):
+        return True
+
+    # ── 3–5. Marathi/English Gat + Hissa label pattern ───────────────────────
+    # Matches: "गट नंबर 1530 हिस्सा नंबर 3"
+    #          "गट क्र. 1530 हिस्सा क्र. 3"
+    #          "Gut No. 1530 Hissa No. 3"
+    gat_hissa = re.compile(
+        rf"{_GAT_LABEL}\s*{re.escape(base)}\s*{_HISSA_LABEL}\s*{re.escape(hissa)}(?![0-9])",
+        re.IGNORECASE | re.UNICODE,
+    )
+    if gat_hissa.search(hay) and not area_false_positive.search(hay):
+        return True
+
     return False
 
 
@@ -697,102 +762,110 @@ async def run_land_case_workflow(workflow_id: str) -> None:
         completed_years = 0
         progress_lock = asyncio.Lock()
 
-        async def _run_igr_year_slice(
+        async def _run_igr_year_loop(
+            igr: IGRFreeSearchScraper,
             year_slice: list[str],
             slice_id: str,
-            stagger_delay: float = 0.0,
         ) -> list[dict]:
+            """Run the per-year search loop on an already-setup IGR scraper."""
             nonlocal completed_years
             local_matches: list[dict] = []
-            if not year_slice:
-                return local_matches
-            if stagger_delay > 0:
-                logger.info(
-                    "[workflow:%s] IGR slice=%s: staggering browser start by %.0fs "
-                    "to avoid simultaneous server load.",
-                    workflow_id,
-                    slice_id,
-                    stagger_delay,
-                )
-                await asyncio.sleep(stagger_delay)
-            igr = IGRFreeSearchScraper(headless=True)
-            igr_scrapers.append(igr)
-            try:
-                await _run_with_retries(
-                    stage="igr_bootstrap",
-                    operation=f"IGR browser setup slice={slice_id}",
-                    op_factory=igr.setup_driver,
-                )
-                for year in year_slice:
-                    try:
-                        recs = await _run_with_retries(
-                            stage="igr_running",
-                            operation=f"IGR search year={year} base_survey={base_survey} slice={slice_id}",
-                            op_factory=lambda year=year: igr.search_rest_maharashtra(
-                                district_label=wf.district_label,
-                                taluka_label=wf.taluka_label,
-                                village_label=wf.village_label or "Wagholi",
-                                survey_number=base_survey,
-                                year=year,
-                            ),
-                        )
-                    except Exception as exc:
-                        raise RuntimeError(
-                            f"survey={base_survey!r} year={year!r} search failed (slice={slice_id}): {exc}"
-                        ) from exc
-
-                    matched = [
-                        r2
-                        for r in recs
-                        if (r2 := _extract_igr_party_row_for_target_survey(r, target_survey_option)) is not None
-                    ]
-                    if matched:
-                        logger.info(
-                            "[workflow:%s] IGR target matches: year=%s base=%r matched_rows=%s target=%r slice=%s",
-                            workflow_id,
-                            year,
-                            base_survey,
-                            len(matched),
-                            target_survey_option,
-                            slice_id,
-                        )
-                    local_matches.extend(matched)
-
-                    async with progress_lock:
-                        completed_years += 1
-                        current_done = completed_years
-                    await _update_workflow(
-                        progress_message=(
-                            f"Searching land transaction records — year {year} "
-                            f"({current_done} of {igr_year_total})…"
-                        ),
-                        years_done=current_done,
-                    )
-            finally:
+            for year in year_slice:
                 try:
-                    await igr.close()
-                except Exception:
-                    logger.exception("[workflow:%s] Failed to close IGR scraper slice=%s.", workflow_id, slice_id)
+                    recs = await _run_with_retries(
+                        stage="igr_running",
+                        operation=f"IGR search year={year} base_survey={base_survey} slice={slice_id}",
+                        op_factory=lambda year=year: igr.search_rest_maharashtra(
+                            district_label=wf.district_label,
+                            taluka_label=wf.taluka_label,
+                            village_label=wf.village_label or "Wagholi",
+                            survey_number=base_survey,
+                            year=year,
+                        ),
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"survey={base_survey!r} year={year!r} search failed (slice={slice_id}): {exc}"
+                    ) from exc
+
+                matched = [
+                    r2
+                    for r in recs
+                    if (r2 := _extract_igr_party_row_for_target_survey(r, target_survey_option)) is not None
+                ]
+                # Log raw property descriptions when rows come back for the
+                # base survey but none match the target — helps diagnose
+                # format differences in the IGR portal data.
+                if recs and not matched:
+                    for r in recs[:3]:
+                        prop = _row_get_any(r, ["Property Description", "PropertyDescription", "property description"])
+                        if prop:
+                            logger.warning(
+                                "[workflow:%s] IGR row not matched target=%r year=%s prop_desc=%r",
+                                workflow_id,
+                                target_survey_option,
+                                year,
+                                prop[:200],
+                            )
+                if matched:
+                    logger.info(
+                        "[workflow:%s] IGR target matches: year=%s base=%r matched_rows=%s target=%r slice=%s",
+                        workflow_id,
+                        year,
+                        base_survey,
+                        len(matched),
+                        target_survey_option,
+                        slice_id,
+                    )
+                local_matches.extend(matched)
+
+                async with progress_lock:
+                    completed_years += 1
+                    current_done = completed_years
+                await _update_workflow(
+                    progress_message=(
+                        f"Searching land transaction records — year {year} "
+                        f"({current_done} of {igr_year_total})…"
+                    ),
+                    years_done=current_done,
+                )
             return local_matches
 
-        if parallel_contexts == 1 or len(igr_years) < 2:
-            year_slices = [igr_years]
-        else:
-            mid = (len(igr_years) + 1) // 2
-            year_slices = [igr_years[:mid], igr_years[mid:]]
+        async def _setup_igr_scraper(slice_id: str, shared_browser=None) -> IGRFreeSearchScraper:
+            igr = IGRFreeSearchScraper(headless=True, shared_browser=shared_browser)
+            igr_scrapers.append(igr)
+            await _run_with_retries(
+                stage="igr_bootstrap",
+                operation=f"IGR browser setup slice={slice_id}",
+                op_factory=igr.setup_driver,
+            )
+            return igr
 
         try:
-            slice_results = await asyncio.gather(
-                *[
-                    _run_igr_year_slice(
-                        year_slice,
-                        f"slice{idx + 1}",
-                        stagger_delay=idx * igr_slice_stagger,
-                    )
-                    for idx, year_slice in enumerate(year_slices)
-                    if year_slice
-                ]
-            )
+            if parallel_contexts == 1 or len(igr_years) < 2:
+                # Single context: one browser, one tab, all years in sequence.
+                igr1 = await _setup_igr_scraper("slice1")
+                slice_results = list(await asyncio.gather(_run_igr_year_loop(igr1, igr_years, "slice1")))
+            else:
+                # Two contexts on ONE shared browser process:
+                #   Phase 1 — launch the browser via slice1 (full ~30s startup).
+                #   Phase 2 — open a second context on the same process (< 1s).
+                #   Phase 3 — run both year loops concurrently.
+                # No stagger needed; browser launch happens only once.
+                mid = (len(igr_years) + 1) // 2
+                igr1 = await _setup_igr_scraper("slice1")
+                igr2 = await _setup_igr_scraper("slice2", shared_browser=igr1.browser)
+                logger.info(
+                    "[workflow:%s] IGR: 1 browser, 2 contexts — slice1=%d years, slice2=%d years.",
+                    workflow_id,
+                    mid,
+                    len(igr_years) - mid,
+                )
+                results = await asyncio.gather(
+                    _run_igr_year_loop(igr1, igr_years[:mid], "slice1"),
+                    _run_igr_year_loop(igr2, igr_years[mid:], "slice2"),
+                )
+                slice_results = list(results)
         except Exception as exc:
             await _fail_workflow("igr_running", exc)
             return
@@ -833,13 +906,14 @@ async def run_land_case_workflow(workflow_id: str) -> None:
         owner_names_for_api = _split_owner_names(owner_name_input)
         owner_source = "input"
         if not owner_names_for_api and entity.occupant_primary_name:
-            # Prefer the primary 7/12 occupant name — it is the single most
-            # reliable name extracted by the Bhulekh scraper.
-            owner_names_for_api = [entity.occupant_primary_name.strip()]
-            owner_source = "bhulekh_primary"
+            primary = entity.occupant_primary_name.strip()
+            if _is_plausible_ecourts_name(primary):
+                # Prefer the primary 7/12 occupant name — most reliable single name.
+                owner_names_for_api = [primary]
+                owner_source = "bhulekh_primary"
         if not owner_names_for_api:
-            # Fall back to full candidate list only when primary is absent,
-            # filtering out Bhulekh field labels and land descriptors.
+            # Fall back to full candidate list, filtering out Bhulekh field
+            # labels, land descriptors, and any other non-name junk.
             owner_names_for_api = [
                 n.strip()
                 for n in (entity.occupant_candidates or [])
@@ -858,11 +932,8 @@ async def run_land_case_workflow(workflow_id: str) -> None:
                 if isinstance(value, str) and value.strip():
                     igr_purchaser_names.extend(_split_party_name_blob(value))
 
-        if igr_purchaser_names:
-            owner_names_for_api.extend(
-                n for n in igr_purchaser_names if _is_plausible_ecourts_name(n)
-            )
-            owner_source = f"{owner_source}+igr_purchasers"
+        # Do not use IGR names for eCourts search input. Keep them only for
+        # diagnostics/output artifacts so API queries remain Bhulekh-driven.
 
         owner_names_for_api = list(dict.fromkeys(owner_names_for_api))
         owner_name = owner_names_for_api[0] if owner_names_for_api else ""
@@ -989,20 +1060,35 @@ async def run_land_case_workflow(workflow_id: str) -> None:
             api_client = EcourtsApiClient(api_key=api_key)
             try:
                 if not cache_hit:
-                    search_rows: list[dict] = []
-                    for owner_query in owner_names_for_api:
-                        owner_rows = await _run_with_retries(
+                    # Fire all per-owner searches concurrently — each is an
+                    # independent HTTP request so there is no ordering dependency.
+                    async def _search_owner(oq: str) -> list[dict]:
+                        return await _run_with_retries(
                             stage="ecourts_running",
-                            operation=f"eCourts API case search owner={owner_query!r}",
-                            op_factory=lambda owner_query=owner_query: api_client.search_cases(
-                                owner_name=owner_query,
+                            operation=f"eCourts API case search owner={oq!r}",
+                            op_factory=lambda oq=oq: api_client.search_cases(
+                                owner_name=oq,
                                 district=wf.district_label,
                                 taluka=wf.taluka_label,
                                 village=wf.village_label,
                                 survey_number=wf.survey_part1,
                             ),
                         )
-                        search_rows.extend(owner_rows)
+
+                    per_owner_results = await asyncio.gather(
+                        *[_search_owner(oq) for oq in owner_names_for_api],
+                        return_exceptions=True,
+                    )
+                    search_rows: list[dict] = []
+                    for result in per_owner_results:
+                        if isinstance(result, Exception):
+                            logger.warning(
+                                "[workflow:%s] One owner search failed (skipped): %s",
+                                workflow_id,
+                                result,
+                            )
+                        else:
+                            search_rows.extend(result)
 
                     # Write unranked CSV immediately after search so raw
                     # normalized API data is always available for debugging.
@@ -1022,7 +1108,7 @@ async def run_land_case_workflow(workflow_id: str) -> None:
                         )
 
                     detail_limit = int(os.getenv("ECOURTS_API_DETAIL_LIMIT", "20"))
-                    detail_concurrency = max(1, int(os.getenv("ECOURTS_API_DETAIL_CONCURRENCY", "1")))
+                    detail_concurrency = max(1, int(os.getenv("ECOURTS_API_DETAIL_CONCURRENCY", "3")))
                     sem = asyncio.Semaphore(detail_concurrency)
                     rows_with_cnr = sum(
                         1

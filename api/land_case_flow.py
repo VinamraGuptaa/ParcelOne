@@ -682,6 +682,10 @@ def rank_api_case_hits(
         owner_match_boost = 0.0
         if owner_total > 0:
             owner_match_boost = 0.08 if all_owner_match else 0.03 * (owner_match_count / owner_total)
+        # Keep only cases where at least one searched owner name is present.
+        # User-facing ordering and visibility should be strictly name-match driven.
+        if owner_match_count == 0:
+            continue
 
         party_score = _party_overlap_score(parties, igr_party_names)
         court = (
@@ -740,9 +744,10 @@ def rank_api_case_hits(
         )
     out.sort(
         key=lambda h: (
-            not h.primary_name_matched,                                          # 7/12 match first
+            -h.owner_match_count,                                                # 4,3,2,1... matches first
+            -(h.owner_match_count / h.owner_total) if h.owner_total else 0.0,   # then match density
+            not h.primary_name_matched,                                          # then prefer 7/12 match
             not (h.owner_total > 1 and h.owner_match_count == h.owner_total),
-            -(h.owner_match_count / h.owner_total) if h.owner_total else 0.0,
             not h.is_civil,
             "pending=false" in (h.match_explanation or ""),
             -h.name_match_score,

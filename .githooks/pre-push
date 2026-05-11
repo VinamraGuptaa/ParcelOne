@@ -1,0 +1,33 @@
+#!/bin/sh
+# pre-push hook: clear the eCourts rank cache so the next workflow run
+# always fetches fresh results after a code push.
+set -e
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+python3 - <<'PYEOF'
+import asyncio, os, sys
+
+sys.path.insert(0, ".")
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///./land_records.db")
+
+
+async def clear_cache():
+    try:
+        from sqlalchemy import delete
+        from api.database import AsyncSessionLocal
+        from api.models import EcourtsRankCache
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(delete(EcourtsRankCache))
+            await session.commit()
+            n = result.rowcount if result.rowcount is not None else "?"
+            print(f"[pre-push] Cleared {n} eCourts rank-cache entries.")
+    except Exception as exc:
+        # Non-fatal: missing DB on a fresh clone is expected.
+        print(f"[pre-push] Cache clear skipped ({type(exc).__name__}: {exc})", file=sys.stderr)
+
+
+asyncio.run(clear_cache())
+PYEOF
