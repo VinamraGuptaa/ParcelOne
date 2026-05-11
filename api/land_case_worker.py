@@ -905,21 +905,22 @@ async def run_land_case_workflow(workflow_id: str) -> None:
         owner_name_input = (wf.owner_name_input or "").strip()
         owner_names_for_api = _split_owner_names(owner_name_input)
         owner_source = "input"
-        if not owner_names_for_api and entity.occupant_primary_name:
-            primary = entity.occupant_primary_name.strip()
-            if _is_plausible_ecourts_name(primary):
-                # Prefer the primary 7/12 occupant name — most reliable single name.
-                owner_names_for_api = [primary]
-                owner_source = "bhulekh_primary"
         if not owner_names_for_api:
-            # Fall back to full candidate list, filtering out Bhulekh field
-            # labels, land descriptors, and any other non-name junk.
-            owner_names_for_api = [
-                n.strip()
-                for n in (entity.occupant_candidates or [])
-                if isinstance(n, str) and n.strip() and _is_plausible_ecourts_name(n)
-            ]
-            owner_source = "bhulekh_candidates"
+            # Collect ALL 7/12 occupant names: primary + every plausible candidate.
+            # A single survey number can have multiple co-owners (see 7/12 extract)
+            # and searching for all of them maximises eCourts hit recall.
+            bhulekh_names: list[str] = []
+            if entity.occupant_primary_name:
+                primary = entity.occupant_primary_name.strip()
+                if _is_plausible_ecourts_name(primary):
+                    bhulekh_names.append(primary)
+            for n in (entity.occupant_candidates or []):
+                if isinstance(n, str) and n.strip() and _is_plausible_ecourts_name(n):
+                    candidate = n.strip()
+                    if candidate not in bhulekh_names:
+                        bhulekh_names.append(candidate)
+            owner_names_for_api = bhulekh_names
+            owner_source = "bhulekh_all"
 
         # Preserve the 7/12 Bhulekh names before IGR names are appended so
         # the ranker can prioritise 7/12 matches over IGR purchaser matches.
