@@ -410,7 +410,6 @@ def _write_ranked_hits_csv(workflow_id: str, hits: list[Any], artifacts_dir: Pat
         "case_type",
         "court",
         "parties_text",
-        "is_civil",
         "name_match_score",
         "matched_variant",
         "match_explanation",
@@ -429,7 +428,6 @@ def _write_ranked_hits_csv(workflow_id: str, hits: list[Any], artifacts_dir: Pat
                     "case_type": hit.case_type,
                     "court": hit.court,
                     "parties_text": hit.parties_text,
-                    "is_civil": hit.is_civil,
                     "name_match_score": hit.name_match_score,
                     "matched_variant": hit.matched_variant,
                     "match_explanation": hit.match_explanation,
@@ -1371,11 +1369,10 @@ async def run_land_case_workflow(workflow_id: str) -> None:
                 type(exc).__name__,
             )
         logger.info(
-            "[workflow:%s] Ranking complete: collected=%s ranked_hits=%s civil_hits=%s csv=%s",
+            "[workflow:%s] Ranking complete: collected=%s ranked_hits=%s csv=%s",
             workflow_id,
             len(collected),
             len(ranked),
-            sum(1 for h in ranked if h.is_civil),
             str(ranked_csv_path) if ranked_csv_path else None,
         )
         async with AsyncSessionLocal() as db:

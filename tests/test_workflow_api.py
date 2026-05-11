@@ -177,7 +177,7 @@ class TestWorkflowApi:
                     taluka_label="Haveli",
                     village_label="Wagholi",
                     source_region="rest_of_maharashtra",
-                    raw_json='{"survey_number":"1530/1","search_year":"2024"}',
+                    raw_json='{"survey_number":"1530/1","search_year":"2024","Purchaser Name":"Buyer One"}',
                 )
             )
             session.add(
@@ -240,6 +240,7 @@ class TestWorkflowApi:
         assert isinstance(body["survey_options"], list)
         assert len(body["hits"]) == 1
         assert len(body["igr_hits"]) == 1
+        assert body["igr_purchaser_names"] == ["Buyer One"]
         assert body["ecourts_api_metrics"]["provider"] == "ecourts_api"
         assert body["ecourts_api_metrics"]["estimated_cost_inr"] == 0.7
         assert len(body["ecourts_api_calls"]) == 1

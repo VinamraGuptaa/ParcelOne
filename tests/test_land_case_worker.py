@@ -136,7 +136,8 @@ class TestLandCaseWorker:
         ranked_csv_path = Path("artifacts/workflows") / f"{wf.id}_ranked_hits.csv"
         assert ranked_csv_path.exists()
         ranked_csv = ranked_csv_path.read_text(encoding="utf-8")
-        assert "final_rank,search_year,case_id" in ranked_csv
+        header = ranked_csv.split("\n", 1)[0]
+        assert "final_rank" in header and "search_year" in header and "is_civil" not in header
 
         await eng.dispose()
 

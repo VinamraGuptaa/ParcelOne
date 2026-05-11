@@ -5,6 +5,7 @@ from api.land_case_flow import (
     build_name_variants,
     extract_survey_option_labels,
     extract_land_entity,
+    owner_name_exact_in_parties,
     rank_case_hits,
     rank_api_case_hits,
     score_case_against_variants,
@@ -55,7 +56,27 @@ def test_score_case_against_variants_prefers_exact():
     assert reason == "exact_substring"
 
 
-def test_rank_case_hits_civil_first_then_score():
+def test_owner_name_exact_in_parties_requires_full_phrase_order():
+    assert owner_name_exact_in_parties(
+        "Lata Arun Narke vs State of Maharashtra",
+        "lata arun narke",
+    )
+    assert not owner_name_exact_in_parties(
+        "Arun Narke vs State",
+        "lata arun narke",
+    )
+    assert not owner_name_exact_in_parties(
+        "Lata Arun Narke vs State",
+        "lata arun nark",
+    )
+
+
+def test_owner_name_exact_single_token_not_substring_of_longer_name():
+    assert owner_name_exact_in_parties("A vs State", "A")
+    assert not owner_name_exact_in_parties("Alice vs State", "A")
+
+
+def test_rank_case_hits_orders_by_match_score_then_search_year():
     records = [
         {
             "Search_Year": "2024",
@@ -73,8 +94,7 @@ def test_rank_case_hits_civil_first_then_score():
     variants = build_name_variants("Snehal Bhushan Dhut")
     out = rank_case_hits(records, variants, min_score=0.2)
     assert len(out) >= 2
-    assert out[0].is_civil is True
-    assert out[0].name_match_score >= out[1].name_match_score or out[1].is_civil is False
+    assert out[0].name_match_score >= out[1].name_match_score
 
 
 def test_extract_survey_option_labels_filters_by_part1():

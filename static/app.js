@@ -330,6 +330,11 @@ function renderResults(workflowId, results, artifacts) {
     if (results.entity?.mutation_numbers?.length) {
       lines.push(`<strong>Mutations:</strong> ${results.entity.mutation_numbers.map(escHtml).join(", ")}`);
     }
+    if (results.igr_purchaser_names?.length) {
+      lines.push(
+        `<strong>IGR names found:</strong> ${results.igr_purchaser_names.map(escHtml).join(", ")}`
+      );
+    }
     entityBlock.innerHTML = lines.join("<br />");
     entityBlock.style.display = "block";
   }
@@ -368,7 +373,6 @@ function renderHits(hits) {
     ["petitioner_advocates_text", "petitionerAdvocates"],
     ["respondent_advocates_text", "respondentAdvocates"],
     ["case_category_facet_path", "caseCategoryFacetPath"],
-    ["is_civil", "is_civil"],
   ];
   const thead = document.createElement("thead");
   const trh = document.createElement("tr");
@@ -384,8 +388,7 @@ function renderHits(hits) {
     const tr = document.createElement("tr");
     cols.forEach(([key]) => {
       const td = document.createElement("td");
-      let val = h[key];
-      if (key === "is_civil") val = val ? "yes" : "no";
+      const val = h[key];
       td.textContent = val == null ? "" : String(val);
       tr.appendChild(td);
     });
@@ -533,7 +536,6 @@ function normalizePublicCases(results) {
       petitioner_advocates_text: (Array.isArray(c.petitioner_advocates) ? c.petitioner_advocates : []).join(", "),
       respondent_advocates_text: (Array.isArray(c.respondent_advocates) ? c.respondent_advocates : []).join(", "),
       case_category_facet_path: c.case_category_facet_path || "",
-      is_civil: Boolean(c.is_civil),
       final_rank: c.final_rank ?? "",
     }))
     .filter((c) => c.cnr_number || c.case_number || c.court || c.case_type || c.case_type_raw);
@@ -566,7 +568,6 @@ function normalizePublicCases(results) {
     petitioner_advocates_text: "",
     respondent_advocates_text: "",
     case_category_facet_path: "",
-    is_civil: Boolean(h.is_civil),
     final_rank: h.final_rank ?? "",
   }));
 }

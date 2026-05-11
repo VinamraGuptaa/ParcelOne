@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.database import get_db
-from api.land_case_worker import run_land_case_workflow
+from api.land_case_worker import _split_party_name_blob, run_land_case_workflow
 from api.models import (
     EcourtsApiCall,
     EcourtsApiCase,
@@ -293,6 +293,21 @@ async def get_land_case_workflow_results(
             WorkflowIgrHit.id.asc(),
         )
     )
+    igr_rows = list(igr_result.scalars().all())
+    igr_purchaser_names: list[str] = []
+    _igr_purch_seen: set[str] = set()
+    for h in igr_rows:
+        raw_dict = json.loads(h.raw_json or "{}")
+        for key in ("purchaser_name", "Purchaser Name", "PurchaserName"):
+            value = raw_dict.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            for part in _split_party_name_blob(value):
+                p = part.strip()
+                if p and p not in _igr_purch_seen:
+                    _igr_purch_seen.add(p)
+                    igr_purchaser_names.append(p)
+            break
     igr_hits = [
         WorkflowIgrHitResponse(
             survey_number=h.survey_number,
@@ -303,7 +318,7 @@ async def get_land_case_workflow_results(
             source_region=h.source_region,
             raw=json.loads(h.raw_json or "{}"),
         )
-        for h in igr_result.scalars().all()
+        for h in igr_rows
     ]
     api_calls_result = await db.execute(
         select(EcourtsApiCall)
@@ -374,6 +389,7 @@ async def get_land_case_workflow_results(
         survey_options=_load_survey_options_for_workflow(wf),
         hits=hits,
         igr_hits=igr_hits,
+        igr_purchaser_names=igr_purchaser_names,
         total_hits=len(hits),
         ecourts_api_metrics=json.loads(wf.ecourts_api_metrics_json or "null"),
         ecourts_api_calls=api_calls,

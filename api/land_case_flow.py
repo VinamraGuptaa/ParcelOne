@@ -88,6 +88,42 @@ def _normalize_name(name: str) -> str:
     return " ".join(tokens)
 
 
+def owner_name_exact_in_parties(parties_text: str, owner: str) -> bool:
+    """
+    True iff the normalized owner name appears in party text as an exact match:
+    - Multi-word owners: token sequence must match a consecutive run in party
+      tokens (so "lata arun narke" matches that order, but "lata arun nark" does
+      not match inside "lata arun narke" as a substring typo/prefix).
+    - Single-token owners: must match a whole token in the party string (so "a"
+      does not match inside "alice").
+    """
+    hay = _normalize_name(parties_text)
+    vn = _normalize_name(owner)
+    if not hay or not vn:
+        return False
+    hay_toks = hay.split()
+    vn_toks = vn.split()
+    if not vn_toks:
+        return False
+    if len(vn_toks) == 1:
+        return vn_toks[0] in hay_toks
+    n = len(vn_toks)
+    for i in range(len(hay_toks) - n + 1):
+        if hay_toks[i : i + n] == vn_toks:
+            return True
+    return False
+
+
+def score_owner_variants_exact_phrase(
+    parties_text: str, variants: list[str]
+) -> tuple[float, str | None, str]:
+    """Best score across owner variants using exact phrase / whole-token rules only."""
+    for v in variants:
+        if isinstance(v, str) and v.strip() and owner_name_exact_in_parties(parties_text, v):
+            return 1.0, v, "exact_phrase"
+    return 0.0, None, "no_exact_match"
+
+
 def _mutation_tokens_from_text(text: str) -> list[str]:
     # Keeps common integer/parenthesized formats seen in the report table.
     found = re.findall(r"\(?\d{2,6}\)?", text or "")
@@ -659,23 +695,25 @@ def rank_api_case_hits(
         rec = _canonicalize_case_record(original)
         parties = _party_text_from_api_record(rec)
 
-        # Score against 7/12 names and IGR names separately.
-        primary_score, matched_owner, reason = score_case_against_variants(parties, primary_variants)
+        # Score owners only when the full normalized name appears as an exact
+        # phrase in party text (no fuzzy / partial-token credit).
+        primary_score, matched_owner, reason = score_owner_variants_exact_phrase(parties, primary_variants)
         secondary_score = 0.0
+        sec_reason = "no_exact_match"
         if secondary_variants:
-            secondary_score, sec_match, sec_reason = score_case_against_variants(parties, secondary_variants)
+            secondary_score, sec_match, sec_reason = score_owner_variants_exact_phrase(
+                parties, secondary_variants
+            )
             if secondary_score > primary_score:
                 matched_owner = matched_owner or sec_match
-                reason = reason if primary_score >= 0.5 else sec_reason
+                reason = reason if primary_score >= 1.0 else sec_reason
 
-        # Overall owner score = best of primary + partial credit from secondary.
         owner_score = max(primary_score, secondary_score * 0.6)
-        primary_name_matched = primary_score >= 0.5
+        primary_name_matched = primary_score >= 1.0
 
         owner_match_count = 0
         for owner in owner_variants:
-            o_score, _, _ = score_case_against_variants(parties, [owner])
-            if o_score >= 0.8:
+            if owner_name_exact_in_parties(parties, owner):
                 owner_match_count += 1
         owner_total = len(owner_variants)
         all_owner_match = owner_total > 1 and owner_match_count == owner_total
@@ -748,7 +786,6 @@ def rank_api_case_hits(
             -(h.owner_match_count / h.owner_total) if h.owner_total else 0.0,   # then match density
             not h.primary_name_matched,                                          # then prefer 7/12 match
             not (h.owner_total > 1 and h.owner_match_count == h.owner_total),
-            not h.is_civil,
             "pending=false" in (h.match_explanation or ""),
             -h.name_match_score,
             h.search_year or "9999",
@@ -850,12 +887,11 @@ def rank_case_hits(
             )
         )
 
-    hits.sort(key=lambda h: (not h.is_civil, -h.name_match_score, h.search_year or "9999"))
+    hits.sort(key=lambda h: (-h.name_match_score, h.search_year or "9999"))
     logger.info(
-        "Case ranking completed: input_records=%s output_hits=%s civil_hits=%s min_score=%.2f",
+        "Case ranking completed: input_records=%s output_hits=%s min_score=%.2f",
         len(records),
         len(hits),
-        sum(1 for h in hits if h.is_civil),
         min_score,
     )
     return hits

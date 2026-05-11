@@ -86,6 +86,12 @@ def test_app_js_uses_expected_workflow_routes():
     assert "artifact/${kind}" in js
 
 
+def test_app_js_shows_igr_purchaser_names_in_results_entity_block():
+    js = _read(APP_JS)
+    assert "igr_purchaser_names" in js
+    assert "IGR names found:" in js
+
+
 def test_app_js_has_required_behaviors():
     js = _read(APP_JS)
 

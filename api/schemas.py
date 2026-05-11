@@ -287,6 +287,8 @@ class LandCaseWorkflowResultsResponse(BaseModel):
     survey_options: list[str]
     hits: list[WorkflowCaseHitResponse]
     igr_hits: list[WorkflowIgrHitResponse]
+    # Purchaser / party names from IGR hit rows (deduplicated; split multi-name blobs).
+    igr_purchaser_names: list[str] = []
     total_hits: int
     ecourts_api_metrics: Optional[dict] = None
     ecourts_api_calls: list[EcourtsApiCallResponse] = []
