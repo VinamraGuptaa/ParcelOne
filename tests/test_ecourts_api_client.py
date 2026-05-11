@@ -1,4 +1,4 @@
-from api.ecourts_api_client import EcourtsApiClient
+from api.ecourts_api_client import DEFAULT_ECOURTS_SEARCH_CASE_TYPES, EcourtsApiClient
 
 
 def test_extract_rows_from_common_payload_shapes():
@@ -44,6 +44,7 @@ async def test_request_metrics_cost_accumulates(monkeypatch):
             return None
 
     monkeypatch.setenv("ECOURTS_API_KEY", "eci_test_key_123456")
+    monkeypatch.delenv("ECOURTS_API_CASE_TYPES", raising=False)
     c = EcourtsApiClient()
     c._client = _Client()
     rows = await c.search_cases(
@@ -61,12 +62,14 @@ async def test_request_metrics_cost_accumulates(monkeypatch):
     assert ("litigants", "abc") in seen_params
     assert all(k != "caseStatuses" for k, _ in seen_params), "caseStatuses should not be sent by default"
     assert all(k != "judicialSections" for k, _ in seen_params), "judicialSections should not be sent by default"
+    for ct in DEFAULT_ECOURTS_SEARCH_CASE_TYPES.split(","):
+        assert ("caseTypes", ct.strip()) in seen_params
     assert c.metrics.request_log[0]["method"] == "GET"
     assert ("litigants", "abc") in c.metrics.request_log[0]["request_params"]
     assert isinstance(c.metrics.request_log[0]["response_json"], dict)
 
 
-async def test_search_cases_adds_configured_case_type_filters(monkeypatch):
+async def test_search_cases_case_types_env_overrides_default(monkeypatch):
     seen_params = []
 
     class _Resp:
@@ -100,6 +103,8 @@ async def test_search_cases_adds_configured_case_type_filters(monkeypatch):
     )
     assert ("caseTypes", "CS") in seen_params
     assert ("caseTypes", "WP_C") in seen_params
+    case_type_values = [v for k, v in seen_params if k == "caseTypes"]
+    assert case_type_values == ["CS", "WP_C"]
 
 
 async def test_retries_on_429(monkeypatch):

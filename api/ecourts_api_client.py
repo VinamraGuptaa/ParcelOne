@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 ECOURTS_API_BASE_URL = "https://webapi.ecourtsindia.com/api/partner"
 
+# Repeated `caseTypes=` query params (see partner API docs). Override with
+# ECOURTS_API_CASE_TYPES as a comma-separated list.
+DEFAULT_ECOURTS_SEARCH_CASE_TYPES = "CS,RCS_A,RCS_B,CMAppl"
+
 # User-provided base rates (enterprise 1x column in shared table).
 ECOURTS_RATE_CARD = {
     "case_search_get": 0.20,
@@ -324,7 +328,9 @@ class EcourtsApiClient:
         # set in env so the minimal request matches the documented example.
         case_statuses = _split_csv_env(os.getenv("ECOURTS_API_CASE_STATUSES", ""))
         judicial_sections = _split_csv_env(os.getenv("ECOURTS_API_JUDICIAL_SECTIONS", ""))
-        case_types = _split_csv_env(os.getenv("ECOURTS_API_CASE_TYPES", ""))
+        case_types = _split_csv_env(
+            os.getenv("ECOURTS_API_CASE_TYPES", DEFAULT_ECOURTS_SEARCH_CASE_TYPES)
+        )
         params: list[tuple[str, Any]] = [
             ("page", 1),
             ("pageSize", int(os.getenv("ECOURTS_API_SEARCH_PAGE_SIZE", "20"))),
