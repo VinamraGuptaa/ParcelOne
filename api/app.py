@@ -1,7 +1,7 @@
 """FastAPI application factory."""
 
-import os
 import logging
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

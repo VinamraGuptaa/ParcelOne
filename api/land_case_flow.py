@@ -77,6 +77,10 @@ class RankedCaseHit:
     match_explanation: str
     raw_json: str
     primary_name_matched: bool = False
+    # Fraction of names on the matched owners' party side that are searched owners.
+    # 1.0 = all names on that side are owners (pure individual / group case).
+    # < 1.0 = strangers are mixed in on the same side.
+    owner_side_purity: float = 0.0
 
 
 def _normalize_name(name: str) -> str:
@@ -86,6 +90,40 @@ def _normalize_name(name: str) -> str:
     txt = txt.replace("_", " ")
     tokens = [t for t in txt.split() if t and t not in HONORIFICS]
     return " ".join(tokens)
+
+
+def _owner_side_purity(rec: dict, variants: list[str]) -> float:
+    """
+    Fraction of names on the *best* party side (petitioners or respondents) that
+    are searched owner names.
+
+    Examples
+    --------
+    Single owner "Lata Arun Narke", petitioners=["Lata Arun Narke"]:
+        → 1/1 = 1.0  (pure individual case — ranks highest)
+
+    Single owner "Lata Arun Narke", petitioners=["Lata Arun Narke", "Ram Singh"]:
+        → 1/2 = 0.5  (stranger mixed in — ranks below pure case)
+
+    5 owners all in petitioners, no strangers:
+        → 5/5 = 1.0
+
+    3 of 5 owners in petitioners alongside 2 strangers:
+        → 3/5 = 0.6
+    """
+    petitioners = [str(p).strip() for p in (rec.get("petitioners") or []) if str(p).strip()]
+    respondents = [str(r).strip() for r in (rec.get("respondents") or []) if str(r).strip()]
+    best = 0.0
+    for side in (petitioners, respondents):
+        if not side:
+            continue
+        matched_on_side = sum(
+            1 for name in side
+            if any(owner_name_exact_in_parties(name, v) for v in variants)
+        )
+        if matched_on_side > 0:
+            best = max(best, matched_on_side / len(side))
+    return round(best, 4)
 
 
 def owner_name_exact_in_parties(parties_text: str, owner: str) -> bool:
@@ -720,6 +758,7 @@ def rank_api_case_hits(
         owner_match_boost = 0.0
         if owner_total > 0:
             owner_match_boost = 0.08 if all_owner_match else 0.03 * (owner_match_count / owner_total)
+        side_purity = _owner_side_purity(rec, owner_variants)
         # Keep only cases where at least one searched owner name is present.
         # User-facing ordering and visibility should be strictly name-match driven.
         if owner_match_count == 0:
@@ -769,10 +808,12 @@ def rank_api_case_hits(
                 owner_total=owner_total,
                 matched_variant=matched_owner,
                 primary_name_matched=primary_name_matched,
+                owner_side_purity=side_purity,
                 match_explanation=(
                     f"{reason};primary_score={primary_score:.2f};secondary_score={secondary_score:.2f};"
                     f"owner_matches={owner_match_count}/{owner_total};"
                     f"owner_match_scope={'all' if all_owner_match else 'partial'};"
+                    f"owner_side_purity={side_purity:.2f};"
                     f"igr_party_overlap={party_score:.2f};"
                     f"district_court_overlap={district_score:.2f};pending={pending}"
                     f";court_location_overlap={location_score:.2f}"
@@ -782,12 +823,13 @@ def rank_api_case_hits(
         )
     out.sort(
         key=lambda h: (
-            -h.owner_match_count,                                                # 4,3,2,1... matches first
-            -(h.owner_match_count / h.owner_total) if h.owner_total else 0.0,   # then match density
-            not h.primary_name_matched,                                          # then prefer 7/12 match
-            not (h.owner_total > 1 and h.owner_match_count == h.owner_total),
-            "pending=false" in (h.match_explanation or ""),
-            -h.name_match_score,
+            -h.owner_match_count,                                                # 1st: most owners matched (5→4→3→2→1)
+            -h.owner_side_purity,                                                # 2nd: matched owners dominate their side
+                                                                                 #      (1.0 = individual/pure group, <1.0 = strangers mixed in)
+            -(h.owner_match_count / h.owner_total) if h.owner_total else 0.0,   # 3rd: match density tiebreak
+            not h.primary_name_matched,                                          # 4th: prefer 7/12 Bhulekh match
+            "pending=false" in (h.match_explanation or ""),                      # 5th: pending cases first
+            -h.name_match_score,                                                 # 6th: overall score
             h.search_year or "9999",
         )
     )
