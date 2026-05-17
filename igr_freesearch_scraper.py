@@ -1035,6 +1035,29 @@ class IGRFreeSearchScraper:
         return [r for r in rows if not IGRFreeSearchScraper._is_placeholder_result_row(r)]
 
     @staticmethod
+    def _save_raw_search_html(
+        html: str,
+        *,
+        survey_number: str,
+        year: str,
+        attempt: int,
+    ) -> Path | None:
+        """
+        When IGR_SAVE_RAW_HTML=1, persist the full page HTML captured immediately
+        after Search submit and *before* BeautifulSoup table parsing.
+        """
+        flag = (os.getenv("IGR_SAVE_RAW_HTML") or "").strip().lower()
+        if flag not in ("1", "true", "yes", "on"):
+            return None
+        out_dir = Path(os.getenv("IGR_RAW_HTML_DIR", "artifacts/igr_debug"))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        safe_survey = re.sub(r"[^\w.-]+", "_", survey_number or "unknown")
+        out_path = out_dir / f"igr_{year}_{safe_survey}_attempt{attempt}.html"
+        out_path.write_text(html or "", encoding="utf-8")
+        logger.info("IGR raw HTML saved (pre-parse): %s (%s bytes)", out_path, len(html or ""))
+        return out_path
+
+    @staticmethod
     def _parse_result_table(html: str) -> list[dict]:
         """
         Parse all visible tables in result area, not just first table.
@@ -1221,6 +1244,12 @@ class IGRFreeSearchScraper:
                 continue
 
             html = await self.page.content()
+            self._save_raw_search_html(
+                html,
+                survey_number=survey_number,
+                year=year,
+                attempt=attempt,
+            )
             parsed = self._parse_result_table(html)
             if parsed:
                 meaningful = self._meaningful_result_rows(parsed)

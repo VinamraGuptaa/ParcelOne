@@ -279,8 +279,40 @@ class LandCaseWorkflowResponse(BaseModel):
         return 0
 
 
+class IgrTransactionEntry(BaseModel):
+    """One IGR registration record formatted for the ownership timeline."""
+    doc_no: str
+    doc_type: str           # English label
+    doc_type_marathi: str   # original DName
+    reg_date: str           # raw DD/MM/YYYY
+    reg_date_fmt: str       # human-readable "March 2019"
+    sro_name: str
+    seller: str             # first seller name (cleaned)
+    buyer: str              # first purchaser name (cleaned)
+    year: str               # search_year
+    litigation_linked: bool = False
+
+
+class LitigationSignalEntry(BaseModel):
+    """One eCourts case displayed as a litigation signal."""
+    parties: str
+    case_type: Optional[str]
+    court: Optional[str]
+    year: Optional[str]
+    cnr_number: Optional[str]
+    case_status: Optional[str]
+    is_pending: bool
+    relevance: str          # "high" | "medium" | "low"
+    final_rank: Optional[int]
+
+
 class LandCaseWorkflowResultsResponse(BaseModel):
     workflow_id: str
+    # Location fields mirrored from the workflow record for the UI report header.
+    district_label: Optional[str] = None
+    taluka_label: Optional[str] = None
+    village_label: Optional[str] = None
+    survey_option_label: Optional[str] = None
     owner_name: Optional[str]
     entity: Optional[LandEntityResponse]
     variants: list[NameVariantResponse]
@@ -293,6 +325,14 @@ class LandCaseWorkflowResultsResponse(BaseModel):
     ecourts_api_metrics: Optional[dict] = None
     ecourts_api_calls: list[EcourtsApiCallResponse] = []
     ecourts_api_cases: list[EcourtsApiCaseResponse] = []
+
+    # ── Due-diligence report fields ───────────────────────────────────────
+    ownership_timeline: list[IgrTransactionEntry] = []
+    litigation_signals: list[LitigationSignalEntry] = []
+    current_owner: Optional[str] = None    # most recent buyer or 7/12 occupant
+    total_transactions: int = 0            # total IGR rows for this survey
+    title_period_years: Optional[int] = None  # years from oldest IGR txn to now
+    flagged: bool = False                  # True when any litigation signals exist
 
 
 class LandCaseWorkflowArtifactsResponse(BaseModel):

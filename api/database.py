@@ -64,3 +64,31 @@ async def get_db():
             yield session
         finally:
             await session.close()
+
+
+# New structured columns added to workflow_igr_hits. Existing rows retain NULL;
+# the route falls back to parsing raw_json for those rows.
+_IGR_HIT_MIGRATIONS = [
+    "ALTER TABLE workflow_igr_hits ADD COLUMN doc_no TEXT",
+    "ALTER TABLE workflow_igr_hits ADD COLUMN doc_type TEXT",
+    "ALTER TABLE workflow_igr_hits ADD COLUMN doc_type_marathi TEXT",
+    "ALTER TABLE workflow_igr_hits ADD COLUMN reg_date TEXT",
+    "ALTER TABLE workflow_igr_hits ADD COLUMN seller_name TEXT",
+    "ALTER TABLE workflow_igr_hits ADD COLUMN buyer_name TEXT",
+]
+
+
+async def run_column_migrations() -> None:
+    """Idempotently add any missing columns to existing tables.
+
+    Uses try/except so it is safe to call on every startup regardless of
+    whether the migration has already been applied.
+    """
+    from sqlalchemy import text
+
+    async with engine.begin() as conn:
+        for stmt in _IGR_HIT_MIGRATIONS:
+            try:
+                await conn.execute(text(stmt))
+            except Exception:
+                pass  # column already exists

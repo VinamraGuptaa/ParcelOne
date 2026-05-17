@@ -222,6 +222,17 @@ class WorkflowIgrHit(Base):
     taluka_label: Mapped[str | None] = mapped_column(Text, nullable=True)
     village_label: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_region: Mapped[str] = mapped_column(String(32), default="rest_of_maharashtra")
+
+    # Structured fields extracted from raw_json at insert time.
+    # Rows inserted before this migration will have NULL here; the route falls
+    # back to parsing raw_json for those.
+    doc_no: Mapped[str | None] = mapped_column(Text, nullable=True)
+    doc_type: Mapped[str | None] = mapped_column(Text, nullable=True)           # English label
+    doc_type_marathi: Mapped[str | None] = mapped_column(Text, nullable=True)   # DName original
+    reg_date: Mapped[str | None] = mapped_column(Text, nullable=True)           # raw DD/MM/YYYY
+    seller_name: Mapped[str | None] = mapped_column(Text, nullable=True)        # first seller
+    buyer_name: Mapped[str | None] = mapped_column(Text, nullable=True)         # first purchaser
+
     raw_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -13,7 +15,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.database import get_db
-from api.land_case_worker import _split_party_name_blob, run_land_case_workflow
+from api.land_case_worker import (
+    MARATHI_DOC_TYPE_EN,
+    _igr_doc_type_en,
+    _split_party_name_blob,
+    run_land_case_workflow,
+)
 from api.models import (
     EcourtsApiCall,
     EcourtsApiCase,
@@ -26,17 +33,193 @@ from api.models import (
 from api.schemas import (
     EcourtsApiCallResponse,
     EcourtsApiCaseResponse,
+    IgrTransactionEntry,
     LandCaseWorkflowArtifactsResponse,
     LandCaseWorkflowCreateRequest,
     LandCaseWorkflowResponse,
     LandCaseWorkflowResultsResponse,
     LandEntityResponse,
+    LitigationSignalEntry,
     NameVariantResponse,
     WorkflowCaseHitResponse,
     WorkflowIgrHitResponse,
 )
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
+
+
+# ── Due-diligence helpers ──────────────────────────────────────────────────
+
+def _fmt_igr_date(raw: str) -> str:
+    """Parse DD/MM/YYYY → 'Month YYYY'; return raw string on failure."""
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    try:
+        dt = datetime.strptime(raw, "%d/%m/%Y")
+        return dt.strftime("%B %Y")
+    except Exception:
+        return raw
+
+
+def _igr_date_year(raw: str) -> int | None:
+    """Extract the year integer from a DD/MM/YYYY string."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%d/%m/%Y").year
+    except Exception:
+        return None
+
+
+def _names_in_parties(names: list[str], parties_text: str) -> bool:
+    """Return True if any of *names* appears (word-level) in parties_text."""
+    if not parties_text:
+        return False
+    pt = re.sub(r"[^\w\s]", " ", parties_text.lower())
+    for name in names:
+        tokens = [t for t in re.sub(r"[^\w\s]", " ", name.lower()).split() if len(t) >= 3]
+        if tokens and all(t in pt for t in tokens):
+            return True
+    return False
+
+
+def _case_year(c: EcourtsApiCase) -> str | None:
+    """Best-effort year string for a case (from filing, registration, or cnr)."""
+    for raw in (c.filing_date, c.registration_date):
+        if raw:
+            try:
+                return str(datetime.strptime(raw.strip(), "%d/%m/%Y").year)
+            except Exception:
+                pass
+    if c.cnr_year:
+        return str(c.cnr_year)
+    return None
+
+
+def _case_relevance(rank: int | None, is_pending: bool) -> str:
+    if rank is not None and rank <= 2:
+        return "high"
+    if (rank is not None and rank <= 5) or is_pending:
+        return "medium"
+    return "low"
+
+
+def _build_due_diligence(
+    igr_rows: list[WorkflowIgrHit],
+    raw_api_cases: list[EcourtsApiCase],
+    occupant_primary_name: str | None,
+) -> dict:
+    """
+    Build ownership_timeline, litigation_signals, current_owner,
+    total_transactions, title_period_years, and flagged from raw DB rows.
+    """
+    # ── Litigation signals from ranked eCourts cases ──────────────────────
+    signals: list[LitigationSignalEntry] = []
+    for c in raw_api_cases:
+        if c.final_rank is None:
+            continue
+        pets = json.loads(c.petitioners_json or "[]")
+        resps = json.loads(c.respondents_json or "[]")
+        if pets or resps:
+            parties_display = (
+                f"{pets[0]} v. {resps[0]}"
+                if pets and resps
+                else (pets[0] if pets else resps[0] if resps else (c.parties_text or ""))
+            )
+        else:
+            parties_display = c.parties_text or ""
+        signals.append(LitigationSignalEntry(
+            parties=parties_display,
+            case_type=c.case_type or c.case_type_raw,
+            court=c.court,
+            year=_case_year(c),
+            cnr_number=c.cnr_number,
+            case_status=c.case_status,
+            is_pending=bool(c.is_pending),
+            relevance=_case_relevance(c.final_rank, bool(c.is_pending)),
+            final_rank=c.final_rank,
+        ))
+    signals.sort(key=lambda s: (s.final_rank is None, s.final_rank or 10**9))
+
+    # Collect all parties text for litigation-linked checking
+    all_parties_texts = [c.parties_text or "" for c in raw_api_cases if c.parties_text]
+
+    # ── Ownership timeline from IGR rows ──────────────────────────────────
+    transactions: list[IgrTransactionEntry] = []
+    earliest_year: int | None = None
+    last_buyer: str | None = None
+
+    for h in igr_rows:
+        raw = json.loads(h.raw_json or "{}")
+
+        # Prefer the structured DB columns (populated for new rows) and fall
+        # back to parsing raw_json for rows inserted before this migration.
+        doc_no = h.doc_no or (raw.get("DocNo") or "").strip()
+        doc_type_m = h.doc_type_marathi or (raw.get("DName") or "").strip()
+        doc_type_en = h.doc_type or _igr_doc_type_en(doc_type_m)
+        reg_date_raw = h.reg_date or (raw.get("RDate") or "").strip()
+        sro_name = (raw.get("SROName") or "").strip()
+
+        if h.seller_name:
+            sellers = [h.seller_name]
+        else:
+            sellers = _split_party_name_blob(raw.get("Seller Name") or "")
+        if h.buyer_name:
+            buyers = [h.buyer_name]
+        else:
+            buyers = _split_party_name_blob(raw.get("Purchaser Name") or "")
+
+        seller_display = sellers[0] if sellers else ""
+        buyer_display = buyers[0] if buyers else ""
+
+        yr = _igr_date_year(reg_date_raw)
+        if yr:
+            if earliest_year is None or yr < earliest_year:
+                earliest_year = yr
+        if buyer_display:
+            last_buyer = buyer_display
+
+        linked = _names_in_parties(
+            [n for n in sellers + buyers if n],
+            " ".join(all_parties_texts),
+        )
+
+        transactions.append(IgrTransactionEntry(
+            doc_no=doc_no,
+            doc_type=doc_type_en,
+            doc_type_marathi=doc_type_m,
+            reg_date=reg_date_raw,
+            reg_date_fmt=_fmt_igr_date(reg_date_raw),
+            sro_name=sro_name,
+            seller=seller_display,
+            buyer=buyer_display,
+            year=h.search_year,
+            litigation_linked=linked,
+        ))
+
+    # Sort newest first
+    def _txn_sort_key(t: IgrTransactionEntry):
+        try:
+            return (-datetime.strptime(t.reg_date, "%d/%m/%Y").timestamp(),)
+        except Exception:
+            return (0,)
+
+    transactions.sort(key=_txn_sort_key)
+
+    current_owner = occupant_primary_name or last_buyer
+    now_year = datetime.now(timezone.utc).year
+    title_period = (now_year - earliest_year) if earliest_year else None
+
+    return {
+        "ownership_timeline": transactions,
+        "litigation_signals": signals,
+        "current_owner": current_owner,
+        "total_transactions": len(transactions),
+        "title_period_years": title_period,
+        "flagged": len(signals) > 0,
+    }
 logger = logging.getLogger(__name__)
 ACTIVE_WORKFLOW_STATUSES = (
     "pending_input",
@@ -344,6 +527,11 @@ async def get_land_case_workflow_results(
         .where(EcourtsApiCase.workflow_id == workflow_id)
         .order_by(EcourtsApiCase.id.asc())
     )
+    raw_api_cases = list(api_cases_result.scalars().all())
+    raw_api_cases_sorted = sorted(
+        raw_api_cases,
+        key=lambda row: (row.final_rank is None, row.final_rank or 10**9, row.id),
+    )
     api_cases = [
         EcourtsApiCaseResponse(
             cnr_number=c.cnr_number,
@@ -375,14 +563,22 @@ async def get_land_case_workflow_results(
             source_stage=c.source_stage,
             raw=json.loads(c.raw_json or "{}"),
         )
-        for c in sorted(
-            api_cases_result.scalars().all(),
-            key=lambda row: (row.final_rank is None, row.final_rank or 10**9, row.id),
-        )
+        for c in raw_api_cases_sorted
     ]
+
+    # ── Due-diligence report data ─────────────────────────────────────────
+    dd = _build_due_diligence(
+        igr_rows=igr_rows,
+        raw_api_cases=raw_api_cases_sorted,
+        occupant_primary_name=entity_response.occupant_primary_name if entity_response else None,
+    )
 
     return LandCaseWorkflowResultsResponse(
         workflow_id=workflow_id,
+        district_label=wf.district_label,
+        taluka_label=wf.taluka_label,
+        village_label=wf.village_label,
+        survey_option_label=wf.survey_option_label,
         owner_name=wf.owner_name_input,
         entity=entity_response,
         variants=variants,
@@ -394,6 +590,7 @@ async def get_land_case_workflow_results(
         ecourts_api_metrics=json.loads(wf.ecourts_api_metrics_json or "null"),
         ecourts_api_calls=api_calls,
         ecourts_api_cases=api_cases,
+        **dd,
     )
 
 

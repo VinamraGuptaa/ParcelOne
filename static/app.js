@@ -304,99 +304,263 @@ async function loadFinalResults(workflowId) {
 }
 
 function renderResults(workflowId, results, artifacts) {
-  const publicCases = normalizePublicCases(results);
-  resultsTitle.textContent = `Matched cases — ${publicCases.length} result(s)`;
-
-  // Counts strip
-  const igrCount = (results.igr_hits || []).length;
-  countsStrip.innerHTML = "";
-  appendChip(countsStrip, "Matches", publicCases.length);
-  appendChip(countsStrip, "IGR hits", igrCount);
-
-  // Owner / occupant block
-  entityBlock.style.display = "none";
-  entityBlock.innerHTML = "";
-  if (results.owner_name || results.entity?.occupant_primary_name) {
-    const lines = [];
-    if (results.owner_name) {
-      lines.push(`<strong>Owner input:</strong> ${escHtml(results.owner_name)}`);
-    }
-    if (results.entity?.occupant_primary_name) {
-      lines.push(`<strong>7/12 occupant:</strong> ${escHtml(results.entity.occupant_primary_name)}`);
-    }
-    if (results.entity?.occupant_candidates?.length) {
-      lines.push(`<strong>Other occupants:</strong> ${results.entity.occupant_candidates.map(escHtml).join(", ")}`);
-    }
-    if (results.entity?.mutation_numbers?.length) {
-      lines.push(`<strong>Mutations:</strong> ${results.entity.mutation_numbers.map(escHtml).join(", ")}`);
-    }
-    if (results.igr_purchaser_names?.length) {
-      lines.push(
-        `<strong>IGR names found:</strong> ${results.igr_purchaser_names.map(escHtml).join(", ")}`
-      );
-    }
-    entityBlock.innerHTML = lines.join("<br />");
-    entityBlock.style.display = "block";
-  }
-
-  renderHits(publicCases);
-  renderArtifacts(workflowId, artifacts);
+  const container = document.getElementById("report-container");
+  container.innerHTML = "";
+  container.appendChild(buildReportCard(workflowId, results, artifacts));
   resultsSection.style.display = "block";
 }
 
-function renderHits(hits) {
-  if (!hits.length) {
-    hitsTable.innerHTML = "<thead><tr><th>No matching cases found yet</th></tr></thead><tbody></tbody>";
-    return;
-  }
-  const cols = [
-    ["final_rank", "Rank"],
-    ["cnr_number", "CNR"],
-    ["case_type", "caseType"],
-    ["case_type_raw", "caseTypeRaw"],
-    ["case_status", "caseStatus"],
-    ["court", "courtName"],
-    ["court_no", "courtNo"],
-    ["district", "district"],
-    ["state", "state"],
-    ["case_number", "caseNumber"],
-    ["cnr_year", "cnrYear"],
-    ["filing_number", "filingNumber"],
-    ["filing_date", "filingDate"],
-    ["registration_number", "registrationNumber"],
-    ["registration_date", "registrationDate"],
-    ["first_hearing_date", "firstHearingDate"],
-    ["next_hearing_date", "nextHearingDate"],
-    ["decision_date", "decisionDate"],
-    ["petitioners_text", "petitioners"],
-    ["respondents_text", "respondents"],
-    ["petitioner_advocates_text", "petitionerAdvocates"],
-    ["respondent_advocates_text", "respondentAdvocates"],
-    ["case_category_facet_path", "caseCategoryFacetPath"],
-  ];
-  const thead = document.createElement("thead");
-  const trh = document.createElement("tr");
-  cols.forEach(([, label]) => {
-    const th = document.createElement("th");
-    th.textContent = label;
-    trh.appendChild(th);
-  });
-  thead.appendChild(trh);
+// ── Report card builder ───────────────────────────────────────────────────
 
-  const tbody = document.createElement("tbody");
-  hits.forEach(h => {
-    const tr = document.createElement("tr");
-    cols.forEach(([key]) => {
-      const td = document.createElement("td");
-      const val = h[key];
-      td.textContent = val == null ? "" : String(val);
-      tr.appendChild(td);
-    });
-    tbody.appendChild(tr);
+function buildReportCard(workflowId, results, artifacts) {
+  const card = el("div", "report-card");
+
+  // ── Header ──
+  const header = el("div", "rpt-header");
+  const hLeft = el("div", "rpt-header-left");
+  const surveyLabel = escHtml(results.survey_option_label || "");
+  const villageLabel = escHtml(results.village_label || results.entity?.village_label || "");
+  const titleDiv = el("div", "rpt-title");
+  titleDiv.textContent = surveyLabel
+    ? `Survey No. ${surveyLabel}${villageLabel ? `, ${villageLabel}` : ""}`
+    : "Survey results";
+
+  const now = new Date();
+  const metaDiv = el("div", "rpt-meta");
+  const districtParts = [
+    results.district_label,
+    results.taluka_label,
+  ].filter(Boolean);
+  const igrYears = results.ownership_timeline?.length
+    ? (() => {
+        const years = results.ownership_timeline.map(t => parseInt(t.year, 10)).filter(Boolean);
+        return years.length ? `IGR records: ${Math.min(...years)}–${now.getFullYear()}` : "";
+      })()
+    : "";
+  metaDiv.textContent = [
+    districtParts.join(" · "),
+    `Generated ${now.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}`,
+    igrYears,
+  ].filter(Boolean).join("  ·  ");
+
+  hLeft.appendChild(titleDiv);
+  hLeft.appendChild(metaDiv);
+
+  const hRight = el("div", "rpt-header-right");
+  const flagged = !!results.flagged;
+  const badge = el("span", `rpt-badge ${flagged ? "rpt-badge-flagged" : "rpt-badge-clear"}`);
+  badge.textContent = flagged ? "⚑ Flagged" : "✓ Clear";
+  hRight.appendChild(badge);
+  if (artifacts?.ranked_csv_path) {
+    const csvLink = el("a", "btn btn-outline btn-sm");
+    csvLink.href = `${API_BASE}/workflows/${workflowId}/artifact/csv`;
+    csvLink.target = "_blank";
+    csvLink.rel = "noopener";
+    csvLink.textContent = "↓ CSV";
+    hRight.appendChild(csvLink);
+  }
+  if (artifacts?.pdf_path) {
+    const pdfLink = el("a", "btn btn-outline btn-sm");
+    pdfLink.href = `${API_BASE}/workflows/${workflowId}/artifact/pdf`;
+    pdfLink.target = "_blank";
+    pdfLink.rel = "noopener";
+    pdfLink.textContent = "↓ PDF";
+    hRight.appendChild(pdfLink);
+  }
+
+  header.appendChild(hLeft);
+  header.appendChild(hRight);
+  card.appendChild(header);
+
+  // ── Stats ──
+  const stats = el("div", "rpt-stats");
+  const sigCount = (results.litigation_signals || []).length;
+  const statDefs = [
+    ["CURRENT OWNER",       results.current_owner || "—",                   false],
+    ["TOTAL TRANSACTIONS",  `${results.total_transactions || 0} entries`,   false],
+    ["LITIGATION SIGNALS",  `${sigCount} case${sigCount !== 1 ? "s" : ""}`, sigCount > 0],
+    ["TITLE PERIOD",        results.title_period_years != null ? `${results.title_period_years} years` : "—", false],
+  ];
+  statDefs.forEach(([label, value, warn]) => {
+    const box = el("div", "rpt-stat");
+    const lbl = el("div", "rpt-stat-label");
+    lbl.textContent = label;
+    const val = el("div", `rpt-stat-value${warn ? " rpt-stat-warn" : ""}`);
+    val.textContent = value;
+    box.appendChild(lbl);
+    box.appendChild(val);
+    stats.appendChild(box);
   });
-  hitsTable.innerHTML = "";
-  hitsTable.appendChild(thead);
-  hitsTable.appendChild(tbody);
+  card.appendChild(stats);
+
+  // ── 7/12 entity summary ──
+  const entityLines = buildEntityLines(results);
+  if (entityLines.length) {
+    const sec = el("div", "rpt-section");
+    const title = el("div", "rpt-section-title");
+    title.textContent = "LAND RECORD (7/12 EXTRACT)";
+    sec.appendChild(title);
+    const box = el("div", "rpt-entity");
+    box.innerHTML = entityLines.join("<br />");
+    sec.appendChild(box);
+    card.appendChild(sec);
+  }
+
+  // ── Ownership timeline ──
+  const timeline = results.ownership_timeline || [];
+  if (timeline.length) {
+    card.appendChild(buildTimelineSection(timeline));
+  }
+
+  // ── Litigation signals ──
+  const signals = results.litigation_signals || [];
+  if (signals.length) {
+    card.appendChild(buildSignalsSection(signals));
+  } else {
+    const sec = el("div", "rpt-section");
+    const title = el("div", "rpt-section-title");
+    title.textContent = "LITIGATION SIGNALS";
+    sec.appendChild(title);
+    const none = el("p");
+    none.style.cssText = "font-size:0.85rem;color:var(--text-muted)";
+    none.textContent = "No litigation cases found linked to this survey.";
+    sec.appendChild(none);
+    card.appendChild(sec);
+  }
+
+  return card;
+}
+
+function buildEntityLines(results) {
+  const lines = [];
+  if (results.owner_name) {
+    lines.push(`<strong>Owner input:</strong> ${escHtml(results.owner_name)}`);
+  }
+  if (results.entity?.occupant_primary_name) {
+    lines.push(`<strong>7/12 occupant:</strong> ${escHtml(results.entity.occupant_primary_name)}`);
+  }
+  if (results.entity?.occupant_candidates?.length) {
+    lines.push(`<strong>Other occupants:</strong> ${results.entity.occupant_candidates.map(escHtml).join(", ")}`);
+  }
+  if (results.entity?.mutation_numbers?.length) {
+    lines.push(`<strong>Mutations:</strong> ${results.entity.mutation_numbers.map(escHtml).join(", ")}`);
+  }
+  if (results.igr_purchaser_names?.length) {
+    lines.push(`<strong>IGR names found:</strong> ${results.igr_purchaser_names.map(escHtml).join(", ")}`);
+  }
+  return lines;
+}
+
+const TL_VISIBLE = 3;
+
+function buildTimelineSection(timeline) {
+  const sec = el("div", "rpt-section");
+  const title = el("div", "rpt-section-title");
+  title.textContent = "OWNERSHIP TIMELINE";
+  sec.appendChild(title);
+
+  const wrap = el("div", "timeline");
+
+  const renderItem = (t) => {
+    const item = el("div", `tl-item${t.litigation_linked ? " tl-flagged" : ""}`);
+    const dot = el("div", "tl-dot");
+    const body = el("div", "tl-body");
+
+    const titleRow = el("div", "tl-title");
+    const arrow = t.seller && t.buyer
+      ? `${escHtml(t.seller)} → ${escHtml(t.buyer)}`
+      : escHtml(t.buyer || t.seller || "—");
+    titleRow.innerHTML = `${escHtml(t.doc_type || t.doc_type_marathi)} — ${arrow}`;
+    if (t.litigation_linked) {
+      const tag = el("span", "tl-tag tl-tag-linked");
+      tag.textContent = "Litigation linked";
+      titleRow.appendChild(tag);
+    }
+
+    const meta = el("div", "tl-meta");
+    const metaParts = [];
+    if (t.doc_no) metaParts.push(`Doc No. ${escHtml(t.doc_no)}`);
+    if (t.sro_name) metaParts.push(escHtml(t.sro_name));
+    meta.innerHTML = metaParts.join(" · ");
+
+    body.appendChild(titleRow);
+    body.appendChild(meta);
+
+    const date = el("div", "tl-date");
+    date.textContent = t.reg_date_fmt || t.year || "";
+
+    item.appendChild(dot);
+    item.appendChild(body);
+    item.appendChild(date);
+    return item;
+  };
+
+  const visibleItems = timeline.slice(0, TL_VISIBLE);
+  const hiddenItems = timeline.slice(TL_VISIBLE);
+
+  visibleItems.forEach(t => wrap.appendChild(renderItem(t)));
+
+  // Hidden items container
+  const hiddenWrap = el("div");
+  hiddenWrap.style.display = "none";
+  hiddenItems.forEach(t => hiddenWrap.appendChild(renderItem(t)));
+  wrap.appendChild(hiddenWrap);
+
+  if (hiddenItems.length) {
+    const expandBtn = el("button", "tl-expand-btn");
+    expandBtn.textContent = `... ${hiddenItems.length} earlier entr${hiddenItems.length === 1 ? "y" : "ies"} ▾`;
+    expandBtn.addEventListener("click", () => {
+      hiddenWrap.style.display = "block";
+      expandBtn.style.display = "none";
+    });
+    wrap.appendChild(expandBtn);
+  }
+
+  sec.appendChild(wrap);
+  return sec;
+}
+
+function buildSignalsSection(signals) {
+  const sec = el("div", "rpt-section");
+  const title = el("div", "rpt-section-title");
+  title.textContent = "LITIGATION SIGNALS";
+  sec.appendChild(title);
+
+  const list = el("div", "signals-list");
+  signals.forEach(s => {
+    const item = el("div", `signal-item sig-${s.relevance}`);
+    const left = el("div", "signal-left");
+
+    const parties = el("div", "signal-parties");
+    parties.textContent = s.parties || "—";
+
+    const metaParts = [];
+    if (s.case_type) metaParts.push(s.case_type);
+    if (s.court) metaParts.push(s.court);
+    if (s.year) metaParts.push(s.year);
+    if (s.case_status) metaParts.push(s.is_pending ? "Pending" : s.case_status);
+    const meta = el("div", "signal-meta");
+    meta.textContent = metaParts.join(" · ");
+
+    left.appendChild(parties);
+    left.appendChild(meta);
+
+    const rel = el("div", "signal-relevance");
+    rel.textContent = `Relevance: ${s.relevance}`;
+
+    item.appendChild(left);
+    item.appendChild(rel);
+    list.appendChild(item);
+  });
+  sec.appendChild(list);
+  return sec;
+}
+
+// ── DOM element helper ────────────────────────────────────────────────────
+function el(tag, className) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  return node;
 }
 
 function renderArtifacts(workflowId, artifacts) {

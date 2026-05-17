@@ -350,6 +350,36 @@ def _is_plausible_ecourts_name(name: str) -> bool:
     return True
 
 
+# Mapping from Marathi IGR document-type labels to English equivalents.
+MARATHI_DOC_TYPE_EN: dict[str, str] = {
+    "खरेदीखत": "Sale deed",
+    "गहाणखत": "Mortgage deed",
+    "बक्षीसपत्र": "Gift deed",
+    "मृत्युपत्र": "Will",
+    "भाडेपट्टा": "Lease deed",
+    "रिकन्व्हेन्स": "Reconveyance",
+    "विक्री करारनामा": "Agreement to sell",
+    "खरेदी करारनामा": "Sale agreement",
+    "दान पत्र": "Donation deed",
+    "हक्क सोड पत्र": "Release deed",
+    "वाटणी पत्र": "Partition deed",
+    "विमुक्ती": "Release",
+    "प्रतिज्ञापत्र": "Affidavit",
+    "बोजा पत्र": "Charge deed",
+    "करारनामा": "Agreement",
+    "36-अ-लिव्ह अॅड लायसन्सेस": "Leave & Licence",
+    "लिव्ह अँड लायसन्स": "Leave & Licence",
+    "लिव्ह अॅड लायसन्सेस": "Leave & Licence",
+    "साठेखत": "Sale agreement",
+}
+
+
+def _igr_doc_type_en(marathi: str) -> str:
+    """Return English label for a Marathi IGR DName, or the original if unknown."""
+    m = (marathi or "").strip()
+    return MARATHI_DOC_TYPE_EN.get(m, m)
+
+
 def _split_party_name_blob(value: str) -> list[str]:
     """
     Split IGR party-name blobs (often wrapped with braces/quotes) into names.
@@ -879,6 +909,9 @@ async def run_land_case_workflow(workflow_id: str) -> None:
             igr_collected.append(rec)
         async with AsyncSessionLocal() as db:
             for rec in igr_collected:
+                doc_type_m = (rec.get("DName") or "").strip()
+                seller_parts = _split_party_name_blob(rec.get("Seller Name") or "")
+                buyer_parts = _split_party_name_blob(rec.get("Purchaser Name") or "")
                 db.add(
                     WorkflowIgrHit(
                         workflow_id=workflow_id,
@@ -888,6 +921,12 @@ async def run_land_case_workflow(workflow_id: str) -> None:
                         taluka_label=rec.get("taluka_label"),
                         village_label=rec.get("village_label") or wf.village_label or "Wagholi",
                         source_region="rest_of_maharashtra",
+                        doc_no=(rec.get("DocNo") or "").strip() or None,
+                        doc_type=_igr_doc_type_en(doc_type_m) or None,
+                        doc_type_marathi=doc_type_m or None,
+                        reg_date=(rec.get("RDate") or "").strip() or None,
+                        seller_name=seller_parts[0] if seller_parts else None,
+                        buyer_name=buyer_parts[0] if buyer_parts else None,
                         raw_json=json.dumps(rec, ensure_ascii=False),
                     )
                 )

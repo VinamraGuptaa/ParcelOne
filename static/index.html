@@ -97,19 +97,21 @@
 
   <div id="results-section" class="card">
     <div class="results-header">
-      <h2 id="results-title">Matched cases</h2>
+      <h2 id="results-title">Due diligence reports</h2>
       <div class="results-actions">
         <button class="btn btn-primary btn-sm" id="reset-btn" type="button">
-          New search
+          + New report
         </button>
       </div>
     </div>
 
-    <div id="counts-strip" class="counts-strip"></div>
+    <!-- New report card rendered here -->
+    <div id="report-container"></div>
 
+    <!-- Legacy elements kept for progressive-enhancement fallback; hidden by default -->
+    <div id="counts-strip" class="counts-strip" style="display:none;"></div>
     <div id="entity-block" class="entity-block" style="display:none;"></div>
-
-    <div class="table-wrap">
+    <div class="table-wrap" style="display:none;">
       <table id="hits-table">
         <thead><tr><th>Loading&hellip;</th></tr></thead>
         <tbody></tbody>

@@ -104,6 +104,27 @@ def create_app() -> FastAPI:
                         logger.info("DB migration already applied: ecourts_api_calls.%s", col_name)
                     else:
                         logger.warning("DB migration skipped for ecourts_api_calls.%s: %s", col_name, exc)
+        # workflow_igr_hits structured columns (added in v2)
+        igr_hit_new_cols = [
+            ("doc_no", "TEXT"),
+            ("doc_type", "TEXT"),
+            ("doc_type_marathi", "TEXT"),
+            ("reg_date", "TEXT"),
+            ("seller_name", "TEXT"),
+            ("buyer_name", "TEXT"),
+        ]
+        for col_name, col_type in igr_hit_new_cols:
+            try:
+                await conn.execute(
+                    text(f"ALTER TABLE workflow_igr_hits ADD COLUMN {col_name} {col_type}")
+                )
+                logger.info("Applied DB migration: workflow_igr_hits.%s", col_name)
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "duplicate column" in msg or "already exists" in msg:
+                    logger.info("DB migration already applied: workflow_igr_hits.%s", col_name)
+                else:
+                    logger.warning("DB migration skipped for workflow_igr_hits.%s: %s", col_name, exc)
         logger.info("Database tables ready.")
         await _recover_orphaned_jobs()
 

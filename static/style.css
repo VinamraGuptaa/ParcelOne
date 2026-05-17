@@ -304,6 +304,238 @@ tbody tr:hover { background: var(--surface-2); }
   .results-actions .btn { flex: 1; text-align: center; }
 }
 
+/* ── Due-diligence report card ── */
+.report-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: 20px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.rpt-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.rpt-header-left { flex: 1; min-width: 0; }
+.rpt-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.35;
+}
+.rpt-meta {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+.rpt-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.rpt-badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+.rpt-badge-flagged {
+  background: #fce8e6;
+  color: #c5221f;
+  border: 1px solid #f5c6c4;
+}
+.rpt-badge-clear {
+  background: #e6f4ea;
+  color: #1e7e34;
+  border: 1px solid #b7dfbe;
+}
+
+/* ── Stats row ── */
+.rpt-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+}
+@media (max-width: 640px) {
+  .rpt-stats { grid-template-columns: repeat(2, 1fr); }
+}
+.rpt-stat {
+  padding: 14px 18px;
+  border-right: 1px solid var(--border);
+}
+.rpt-stat:last-child { border-right: none; }
+.rpt-stat-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 5px;
+}
+.rpt-stat-value {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.rpt-stat-value.rpt-stat-warn { color: var(--danger); }
+
+/* ── Report sections (timeline + signals) ── */
+.rpt-section {
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.rpt-section:last-child { border-bottom: none; }
+.rpt-section-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 14px;
+}
+
+/* ── Ownership timeline ── */
+.timeline { position: relative; }
+.tl-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 8px;
+  background: var(--surface);
+  position: relative;
+}
+.tl-item.tl-flagged {
+  border-color: #f5c6c4;
+  background: #fff8f7;
+}
+.tl-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--border);
+  flex-shrink: 0;
+  margin-top: 5px;
+}
+.tl-item.tl-flagged .tl-dot { background: var(--danger); }
+.tl-item:not(.tl-flagged):first-child .tl-dot { background: var(--primary); }
+.tl-body { flex: 1; min-width: 0; }
+.tl-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  line-height: 1.45;
+}
+.tl-tag {
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 10px;
+}
+.tl-tag-linked {
+  background: #fce8e6;
+  color: #c5221f;
+  border: 1px solid #f5c6c4;
+}
+.tl-meta {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+.tl-date {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+.tl-expand-btn {
+  background: none;
+  border: none;
+  color: var(--primary);
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 6px 0;
+  display: block;
+}
+.tl-expand-btn:hover { text-decoration: underline; }
+
+/* ── Litigation signals ── */
+.signals-list { display: flex; flex-direction: column; gap: 8px; }
+.signal-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  border-left: 4px solid transparent;
+  flex-wrap: wrap;
+}
+.signal-item.sig-high {
+  background: #fef2f2;
+  border-color: var(--danger);
+}
+.signal-item.sig-medium {
+  background: #fffbeb;
+  border-color: var(--warning);
+}
+.signal-item.sig-low {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+.signal-left { flex: 1; min-width: 0; }
+.signal-parties {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.4;
+}
+.signal-meta {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.signal-relevance {
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.sig-high   .signal-relevance { color: var(--danger); }
+.sig-medium .signal-relevance { color: var(--warning); }
+.sig-low    .signal-relevance { color: var(--text-muted); }
+
+/* ── 7/12 entity summary inside report card ── */
+.rpt-entity {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  font-size: 0.82rem;
+  color: var(--text);
+  line-height: 1.6;
+  margin-bottom: 0;
+}
+
 /* ── Busy / Modal dialog ── */
 .modal-overlay {
   position: fixed;

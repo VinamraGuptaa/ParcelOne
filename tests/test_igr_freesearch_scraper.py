@@ -87,3 +87,23 @@ def test_match_option_label_tolerates_lossy_prefix_question_mark():
 
 def test_match_option_label_tolerates_bom_and_zero_width():
     assert IGRFreeSearchScraper._match_option_label("दारवली", "\ufeff\u200bदारवली\u200d") is True
+
+
+def test_save_raw_search_html_writes_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("IGR_SAVE_RAW_HTML", "1")
+    monkeypatch.setenv("IGR_RAW_HTML_DIR", str(tmp_path))
+    html = "<html><body><table><tr><td>DocNo</td></tr></table></body></html>"
+    out = IGRFreeSearchScraper._save_raw_search_html(
+        html, survey_number="1530/3", year="2024", attempt=1
+    )
+    assert out is not None
+    assert out.exists()
+    assert out.read_text(encoding="utf-8") == html
+
+
+def test_save_raw_search_html_skipped_by_default(monkeypatch):
+    monkeypatch.delenv("IGR_SAVE_RAW_HTML", raising=False)
+    out = IGRFreeSearchScraper._save_raw_search_html(
+        "<html></html>", survey_number="70", year="2020", attempt=1
+    )
+    assert out is None
