@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
-from api.database import engine, Base, AsyncSessionLocal, ensure_workflow_igr_hit_columns
+from api.database import engine, Base, AsyncSessionLocal
 from api.models import SearchJob, LandCaseWorkflow
 from api.routes.jobs import router as jobs_router
 from api.routes.cases import router as cases_router
@@ -104,7 +104,6 @@ def create_app() -> FastAPI:
                         logger.info("DB migration already applied: ecourts_api_calls.%s", col_name)
                     else:
                         logger.warning("DB migration skipped for ecourts_api_calls.%s: %s", col_name, exc)
-        await ensure_workflow_igr_hit_columns()
         logger.info("Database tables ready.")
         await _recover_orphaned_jobs()
 

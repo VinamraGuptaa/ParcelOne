@@ -14,7 +14,7 @@ from typing import Any
 
 from sqlalchemy import select, delete
 
-from api.database import AsyncSessionLocal, ensure_workflow_igr_hit_columns
+from api.database import AsyncSessionLocal
 from api.land_case_flow import (
     build_name_variants,
     dedupe_case_key,
@@ -378,6 +378,24 @@ def _igr_doc_type_en(marathi: str) -> str:
     """Return English label for a Marathi IGR DName, or the original if unknown."""
     m = (marathi or "").strip()
     return MARATHI_DOC_TYPE_EN.get(m, m)
+
+
+def parse_igr_hit_raw(raw: dict) -> dict:
+    """Extract timeline fields from one IGR hit raw_json dict."""
+    doc_type_m = (raw.get("DName") or "").strip()
+    sellers = _split_party_name_blob(raw.get("Seller Name") or "")
+    buyers = _split_party_name_blob(raw.get("Purchaser Name") or "")
+    return {
+        "doc_no": (raw.get("DocNo") or "").strip(),
+        "doc_type": _igr_doc_type_en(doc_type_m),
+        "doc_type_marathi": doc_type_m,
+        "reg_date": (raw.get("RDate") or "").strip(),
+        "sro_name": (raw.get("SROName") or "").strip(),
+        "seller": sellers[0] if sellers else "",
+        "buyer": buyers[0] if buyers else "",
+        "sellers": sellers,
+        "buyers": buyers,
+    }
 
 
 def _split_party_name_blob(value: str) -> list[str]:
@@ -907,12 +925,8 @@ async def run_land_case_workflow(workflow_id: str) -> None:
                 continue
             igr_seen.add(key)
             igr_collected.append(rec)
-        await ensure_workflow_igr_hit_columns()
         async with AsyncSessionLocal() as db:
             for rec in igr_collected:
-                doc_type_m = (rec.get("DName") or "").strip()
-                seller_parts = _split_party_name_blob(rec.get("Seller Name") or "")
-                buyer_parts = _split_party_name_blob(rec.get("Purchaser Name") or "")
                 db.add(
                     WorkflowIgrHit(
                         workflow_id=workflow_id,
@@ -922,12 +936,6 @@ async def run_land_case_workflow(workflow_id: str) -> None:
                         taluka_label=rec.get("taluka_label"),
                         village_label=rec.get("village_label") or wf.village_label or "Wagholi",
                         source_region="rest_of_maharashtra",
-                        doc_no=(rec.get("DocNo") or "").strip() or None,
-                        doc_type=_igr_doc_type_en(doc_type_m) or None,
-                        doc_type_marathi=doc_type_m or None,
-                        reg_date=(rec.get("RDate") or "").strip() or None,
-                        seller_name=seller_parts[0] if seller_parts else None,
-                        buyer_name=buyer_parts[0] if buyer_parts else None,
                         raw_json=json.dumps(rec, ensure_ascii=False),
                     )
                 )

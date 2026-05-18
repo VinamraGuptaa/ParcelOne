@@ -14,11 +14,10 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.database import ensure_workflow_igr_hit_columns, get_db
+from api.database import get_db
 from api.land_case_worker import (
-    MARATHI_DOC_TYPE_EN,
-    _igr_doc_type_en,
     _split_party_name_blob,
+    parse_igr_hit_raw,
     run_land_case_workflow,
 )
 from api.models import (
@@ -153,26 +152,16 @@ def _build_due_diligence(
 
     for h in igr_rows:
         raw = json.loads(h.raw_json or "{}")
-
-        # Prefer the structured DB columns (populated for new rows) and fall
-        # back to parsing raw_json for rows inserted before this migration.
-        doc_no = h.doc_no or (raw.get("DocNo") or "").strip()
-        doc_type_m = h.doc_type_marathi or (raw.get("DName") or "").strip()
-        doc_type_en = h.doc_type or _igr_doc_type_en(doc_type_m)
-        reg_date_raw = h.reg_date or (raw.get("RDate") or "").strip()
-        sro_name = (raw.get("SROName") or "").strip()
-
-        if h.seller_name:
-            sellers = [h.seller_name]
-        else:
-            sellers = _split_party_name_blob(raw.get("Seller Name") or "")
-        if h.buyer_name:
-            buyers = [h.buyer_name]
-        else:
-            buyers = _split_party_name_blob(raw.get("Purchaser Name") or "")
-
-        seller_display = sellers[0] if sellers else ""
-        buyer_display = buyers[0] if buyers else ""
+        fields = parse_igr_hit_raw(raw)
+        doc_no = fields["doc_no"]
+        doc_type_m = fields["doc_type_marathi"]
+        doc_type_en = fields["doc_type"]
+        reg_date_raw = fields["reg_date"]
+        sro_name = fields["sro_name"]
+        sellers = fields["sellers"]
+        buyers = fields["buyers"]
+        seller_display = fields["seller"]
+        buyer_display = fields["buyer"]
 
         yr = _igr_date_year(reg_date_raw)
         if yr:
@@ -467,7 +456,6 @@ async def get_land_case_workflow_results(
         )
         for h in hit_result.scalars().all()
     ]
-    await ensure_workflow_igr_hit_columns()
     igr_result = await db.execute(
         select(WorkflowIgrHit)
         .where(WorkflowIgrHit.workflow_id == workflow_id)
