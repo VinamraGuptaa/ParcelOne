@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.database import get_db
 from api.land_case_worker import (
+    _is_plausible_ecourts_name,
     _split_party_name_blob,
     parse_igr_hit_raw,
     run_land_case_workflow,
@@ -414,9 +415,11 @@ async def get_land_case_workflow_results(
     ent = ent_result.scalar_one_or_none()
     entity_response = None
     if ent is not None:
+        raw_candidates: list[str] = json.loads(ent.occupant_candidates_json or "[]")
+        filtered_candidates = [c for c in raw_candidates if _is_plausible_ecourts_name(c)]
         entity_response = LandEntityResponse(
             occupant_primary_name=ent.occupant_primary_name,
-            occupant_candidates=json.loads(ent.occupant_candidates_json or "[]"),
+            occupant_candidates=filtered_candidates,
             mutation_numbers=json.loads(ent.mutation_numbers_json or "[]"),
             extraction_confidence=ent.extraction_confidence or 0.0,
         )

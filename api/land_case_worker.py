@@ -115,10 +115,23 @@ _AREA_UNIT_TOKENS = frozenset([
     "फूट", "फुट", "मीटर", "meter", "metre", "हेक्टर", "hectare", "acre",
 ])
 
-# Marathi / transliterated keywords for Gat-number labels in IGR descriptions.
-# IGR uses patterns like: "गट नंबर 1530 हिस्सा नंबर 3"
-_GAT_LABEL = r"(?:गट|gut|gat)\s*(?:नंबर|नं\.?|क्र\.?|क्रं\.?|no\.?|num\.?|number)?"
-_HISSA_LABEL = r"(?:हिस्सा|हिस्से|hissa|हि\.?|ह\.?)\s*(?:नंबर|नं\.?|क्र\.?|क्रं\.?|no\.?|num\.?|number)?"
+# Marathi / transliterated keywords for Gat/Survey-number labels in IGR descriptions.
+# IGR uses many variations:
+#   "गट नंबर 1530 हिस्सा नंबर 3"
+#   "गट क्रमांक 1530 हिस्सा क्रमांक 3"
+#   "स.नं. 1530 हिस्सा 3"           (सर्वे नं prefix, no गट)
+#   "सर्वे नं. 1530 भाग 3"           (भाग = part, alternative to हिस्सा)
+_NUM_LABEL = r"(?:नंबर|नं\.?|क्रमांक|क्र\.?|क्रं\.?|no\.?|num\.?|number)?"
+# Gat/Survey prefix — also matches abbreviated सर्वे prefixes (स.नं., स नं, सर्वे नं)
+_GAT_LABEL = (
+    r"(?:(?:गट|gut|gat)"
+    r"|(?:स\.?\s*नं\.?(?:\s+|\.))"        # स.नं. / स नं / स.नं
+    r"|(?:सर्वे\s*(?:नं\.?|नंबर|क्र\.?|क्रमांक)?)"  # सर्वे नं / सर्वे नंबर
+    r"|(?:survey\s*(?:no\.?|num\.?|number)?)"
+    r")\s*" + _NUM_LABEL
+)
+# Hissa/sub-survey separator — हिस्सा, भाग (part), or plain English "hissa"
+_HISSA_LABEL = r"(?:हिस्सा|हिस्से|hissa|हि\.?|ह\.?|भाग)\s*" + _NUM_LABEL
 
 
 def _contains_exact_survey_token(text: str, survey_token: str) -> bool:
@@ -175,15 +188,27 @@ def _contains_exact_survey_token(text: str, survey_token: str) -> bool:
     if m and not area_false_positive.search(hay):
         return True
 
-    # ── 3–5. Marathi/English Gat + Hissa label pattern ───────────────────────
+    # ── 3–5. Survey/Gat label + BASE + Hissa label + HISSA ───────────────────
     # Matches: "गट नंबर 1530 हिस्सा नंबर 3"
+    #          "गट क्रमांक 1530 हिस्सा क्रमांक 3"
     #          "गट क्र. 1530 हिस्सा क्र. 3"
     #          "Gut No. 1530 Hissa No. 3"
+    #          "स.नं. 1530 हिस्सा 3"
+    #          "सर्वे नं. 1530 भाग 3"
     gat_hissa = re.compile(
         rf"{_GAT_LABEL}\s*{re.escape(base)}\s*{_HISSA_LABEL}\s*{re.escape(hissa)}(?![0-9])",
         re.IGNORECASE | re.UNICODE,
     )
     if gat_hissa.search(hay) and not area_false_positive.search(hay):
+        return True
+
+    # ── 6. Bare BASE + Hissa label + HISSA (no survey prefix) ────────────────
+    # Matches: "1530 हिस्सा 3",  "1530 भाग 3",  "1530 हिस्सा नंबर 3"
+    bare_hissa = re.compile(
+        rf"(?<![0-9]){re.escape(base)}\s+{_HISSA_LABEL}\s*{re.escape(hissa)}(?![0-9])",
+        re.IGNORECASE | re.UNICODE,
+    )
+    if bare_hissa.search(hay) and not area_false_positive.search(hay):
         return True
 
     return False
@@ -784,9 +809,14 @@ async def run_land_case_workflow(workflow_id: str) -> None:
             target_survey_option,
             sibling_surveys,
         )
-        # IGR portal behaves base-first: search by part1 (e.g. "70"), then filter result rows
-        # where property description references the initial survey option (e.g. "70/6").
+        # IGR portal search uses the plain base number (e.g. "1530"), never "1530/3" with a
+        # slash — the portal accepts only the Gat base.  It returns all documents whose
+        # property descriptions mention that base survey in any format.  We then apply
+        # _extract_igr_party_row_for_target_survey which uses _contains_exact_survey_token
+        # to filter for the exact sub-survey (e.g. "1530/3") across all text variations:
+        # slash notation, spaced-slash, Marathi Gat+Hissa label, English Gut+Hissa label, etc.
         base_survey = (wf.survey_part1 or "").strip()
+        igr_search_survey = base_survey
         igr_years = _igr_years_from_2002_to_current()
         igr_year_total = len(igr_years)
         async with AsyncSessionLocal() as db:
@@ -820,18 +850,18 @@ async def run_land_case_workflow(workflow_id: str) -> None:
                 try:
                     recs = await _run_with_retries(
                         stage="igr_running",
-                        operation=f"IGR search year={year} base_survey={base_survey} slice={slice_id}",
+                        operation=f"IGR search year={year} survey={igr_search_survey} slice={slice_id}",
                         op_factory=lambda year=year: igr.search_rest_maharashtra(
                             district_label=wf.district_label,
                             taluka_label=wf.taluka_label,
                             village_label=wf.village_label or "Wagholi",
-                            survey_number=base_survey,
+                            survey_number=igr_search_survey,
                             year=year,
                         ),
                     )
                 except Exception as exc:
                     raise RuntimeError(
-                        f"survey={base_survey!r} year={year!r} search failed (slice={slice_id}): {exc}"
+                        f"survey={igr_search_survey!r} year={year!r} search failed (slice={slice_id}): {exc}"
                     ) from exc
 
                 matched = [
