@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.database import get_db
+from api.database import ensure_workflow_igr_hit_columns, get_db
 from api.land_case_worker import (
     MARATHI_DOC_TYPE_EN,
     _igr_doc_type_en,
@@ -467,6 +467,7 @@ async def get_land_case_workflow_results(
         )
         for h in hit_result.scalars().all()
     ]
+    await ensure_workflow_igr_hit_columns()
     igr_result = await db.execute(
         select(WorkflowIgrHit)
         .where(WorkflowIgrHit.workflow_id == workflow_id)

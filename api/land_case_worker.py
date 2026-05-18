@@ -14,7 +14,7 @@ from typing import Any
 
 from sqlalchemy import select, delete
 
-from api.database import AsyncSessionLocal
+from api.database import AsyncSessionLocal, ensure_workflow_igr_hit_columns
 from api.land_case_flow import (
     build_name_variants,
     dedupe_case_key,
@@ -907,6 +907,7 @@ async def run_land_case_workflow(workflow_id: str) -> None:
                 continue
             igr_seen.add(key)
             igr_collected.append(rec)
+        await ensure_workflow_igr_hit_columns()
         async with AsyncSessionLocal() as db:
             for rec in igr_collected:
                 doc_type_m = (rec.get("DName") or "").strip()
