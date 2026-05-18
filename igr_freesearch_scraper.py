@@ -943,6 +943,17 @@ class IGRFreeSearchScraper:
         )
 
         if not (district_ok and taluka_ok and village_ok):
+            # Form fields are completely blank — the page has likely drifted to a
+            # blank / error state (common on the second shared-browser context after
+            # a postback failure).  Navigate back to the portal before raising so
+            # that the outer _run_with_retries gets a clean page on its next attempt.
+            try:
+                await self._navigate_to_portal()
+                await asyncio.sleep(0.8)
+                await self._close_startup_popup()
+                await self._switch_to_rest_of_maharashtra_tab()
+            except Exception:
+                pass
             raise RuntimeError(
                 "IGR form fill failed: district/taluka/village not selected "
                 f"(district_ok={district_ok}, taluka_ok={taluka_ok}, village_ok={village_ok}, snapshot={snapshot})"
@@ -1115,6 +1126,21 @@ class IGRFreeSearchScraper:
             survey_number,
             year,
         )
+        # If the page has drifted off the portal (blank page, error page, or
+        # a previous navigation left it somewhere unexpected), reload it now so
+        # _fill_search_form starts from a known-good state.
+        try:
+            current_url = self.page.url or ""
+            if "freesearchigrservice" not in current_url:
+                logger.info(
+                    "IGR page URL is %r (not portal) — reloading portal before form fill.", current_url
+                )
+                await self._navigate_to_portal()
+                await asyncio.sleep(0.8)
+                await self._close_startup_popup()
+                await self._switch_to_rest_of_maharashtra_tab()
+        except Exception:
+            pass
         await self._close_startup_popup()
         await self._fill_search_form(
             district_label=district_label,
