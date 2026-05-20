@@ -61,6 +61,8 @@ _LABEL_ALIASES: dict[str, tuple[str, ...]] = {
     "uruli devachi": ("उरुळी देवाची", "उरळी देवाची", "उरुळीदेवाची", "uruli devachi"),
     "waghol": ("वाघोली", "वाघोळी", "waghol", "wagoli"),
     "wagholi": ("वाघोली", "वाघोळी", "waghol", "wagoli"),
+    "darawali": ("दारवली", "daravali", "darawali", "dara vali"),
+    "daravali": ("दारवली", "darawali", "dara vali"),
     "karve nagar": ("कर्वेनगर", "म .कर्वेनगर", "karvenagar", "karve nagar"),
     "karvenagar": ("कर्वेनगर", "म .कर्वेनगर", "karve nagar"),
 }
@@ -1211,63 +1213,92 @@ class IGRFreeSearchScraper:
             if not clicked:
                 await self.page.evaluate("document.querySelector('form')?.submit()")
                 logger.info("IGR captcha attempt %s/%s: fallback form submit().", attempt, MAX_CAPTCHA_RETRIES)
-            await self._wait_for_postback_settle(timeout_s=25.0)
-            # Small extra buffer after spinner/discrete postback settles.
-            await asyncio.sleep(0.8)
 
-            # Portal sometimes returns a red status message "Entered Correct Captcha"
-            # while still staying on the same form. Per workflow requirement, retry captcha.
+            # ── Phase-1: quick settle (portal just validates captcha + shows status) ──
+            await self._wait_for_postback_settle(timeout_s=25.0)
+            await asyncio.sleep(0.5)
+
             try:
                 status_text = (
                     await self.page.locator("#lblimg_new").first.inner_text(timeout=1000)
                 ).strip()
             except Exception:
                 status_text = ""
+
             if status_text and "entered correct captcha" in status_text.lower():
+                # Portal accepted Phase-1 captcha and issued a fresh captcha for Phase-2.
                 logger.info(
-                    "IGR captcha attempt %s/%s: status=%r -> retrying captcha/search.",
-                    attempt,
-                    MAX_CAPTCHA_RETRIES,
-                    status_text,
+                    "IGR captcha attempt %s/%s: Phase-1 accepted — waiting for new captcha.",
+                    attempt, MAX_CAPTCHA_RETRIES,
                 )
+                # Wait for the new captcha image to be ready (up to 5s).
+                for _ in range(10):
+                    cur_fp = await self._get_captcha_src_fingerprint()
+                    if cur_fp and cur_fp != fp_before:
+                        break
+                    await asyncio.sleep(0.5)
+                logger.info(
+                    "IGR captcha attempt %s/%s: new captcha ready — proceeding to Phase-2.",
+                    attempt, MAX_CAPTCHA_RETRIES,
+                )
+                continue  # solve the new captcha on the next loop iteration (Phase-2)
+
+            # ── Phase-2: wait for "Please Wait" to appear then disappear ────────────
+            # After Phase-2 submit the server starts a long async query.
+            # We must: (1) wait for the spinner to appear, (2) wait for it to finish.
+            logger.info(
+                "IGR captcha attempt %s/%s: Phase-2 — waiting for 'Please Wait' spinner.",
+                attempt, MAX_CAPTCHA_RETRIES,
+            )
+            # Step 1: wait up to 10s for spinner to appear (confirm server is working).
+            for _ in range(20):
+                await asyncio.sleep(0.5)
                 try:
-                    # Preferred behavior: site auto-refreshes captcha after this status.
-                    # Wait for that new captcha first, then use it on next loop.
-                    changed = False
-                    for _ in range(10):
-                        cur_fp = await self._get_captcha_src_fingerprint()
-                        if cur_fp and cur_fp != fp_before:
-                            changed = True
-                            break
-                        await asyncio.sleep(0.4)
-                    if changed:
-                        logger.info(
-                            "IGR captcha attempt %s/%s: captcha changed after status retry=True",
-                            attempt,
-                            MAX_CAPTCHA_RETRIES,
-                        )
-                    else:
-                        # Per updated flow: if captcha does not change, refresh page and re-run
-                        # the same year as a fresh search form cycle.
-                        logger.info(
-                            "IGR captcha attempt %s/%s: captcha unchanged after status; refreshing page and refilling form.",
-                            attempt,
-                            MAX_CAPTCHA_RETRIES,
-                        )
-                        await self.page.reload(wait_until="domcontentloaded", timeout=IGR_GOTO_TIMEOUT_MS)
-                        await asyncio.sleep(0.8)
-                        await self._close_startup_popup()
-                        await self._switch_to_rest_of_maharashtra_tab()
-                        await self._fill_search_form(
-                            district_label=district_label,
-                            taluka_label=taluka_label,
-                            village_label=village_label,
-                            survey_number=survey_number,
-                            year=year,
-                        )
+                    spinner_up = await self.page.evaluate(
+                        """() => {
+                            const el = document.getElementById('UpdateProgress1');
+                            if (!el) return false;
+                            const cs = window.getComputedStyle(el);
+                            return cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0';
+                        }"""
+                    )
                 except Exception:
-                    logger.info("IGR captcha refresh best-effort failed; continuing retry.")
-                continue
+                    spinner_up = False
+                if spinner_up:
+                    logger.info(
+                        "IGR captcha attempt %s/%s: 'Please Wait' spinner appeared — server processing.",
+                        attempt, MAX_CAPTCHA_RETRIES,
+                    )
+                    break
+
+            # Step 2: wait up to 120s for spinner to disappear (results loaded).
+            deadline = asyncio.get_event_loop().time() + 120.0
+            elapsed_s = 0
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(1.0)
+                elapsed_s += 1
+                try:
+                    spinner_done = await self.page.evaluate(
+                        """() => {
+                            const el = document.getElementById('UpdateProgress1');
+                            if (!el) return true;
+                            const cs = window.getComputedStyle(el);
+                            return cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0';
+                        }"""
+                    )
+                except Exception:
+                    spinner_done = True
+                if spinner_done:
+                    logger.info(
+                        "IGR captcha attempt %s/%s: spinner gone after %ds — reading results.",
+                        attempt, MAX_CAPTCHA_RETRIES, elapsed_s,
+                    )
+                    break
+                if elapsed_s % 15 == 0:
+                    logger.info(
+                        "IGR captcha attempt %s/%s: still waiting for spinner… %ds elapsed.",
+                        attempt, MAX_CAPTCHA_RETRIES, elapsed_s,
+                    )
 
             html = await self.page.content()
             self._save_raw_search_html(
@@ -1276,6 +1307,15 @@ class IGRFreeSearchScraper:
                 year=year,
                 attempt=attempt,
             )
+            # Portal shows this Marathi phrase when a year genuinely has no records.
+            if "आढळून आलेली नाही" in html:
+                logger.info(
+                    "IGR captcha attempt %s/%s: portal confirmed zero results for year=%r.",
+                    attempt, MAX_CAPTCHA_RETRIES, year,
+                )
+                await self._click_cancel_for_next_year()
+                return []
+
             parsed = self._parse_result_table(html)
             if parsed:
                 meaningful = self._meaningful_result_rows(parsed)

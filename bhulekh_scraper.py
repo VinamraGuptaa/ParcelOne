@@ -1346,6 +1346,8 @@ _LABEL_ALIASES: dict[str, tuple[str, ...]] = {
     "uruli devachi": ("उरुळी देवाची", "उरुळीदेवाची", "uruli devachi"),
     "waghol": ("वाघोली", "वाघोळी", "waghol", "wagoli"),
     "wagholi": ("वाघोली", "वाघोळी", "waghol", "wagoli"),
+    "darawali": ("दारवली", "daravali", "darawali", "dara vali"),
+    "daravali": ("दारवली", "darawali", "dara vali"),
     "karve nagar": ("कर्वेनगर", "म .कर्वेनगर", "karvenagar", "karve nagar"),
     "karvenagar": ("कर्वेनगर", "म .कर्वेनगर", "karve nagar"),
 }
