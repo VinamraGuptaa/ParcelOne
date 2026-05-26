@@ -1,4 +1,4 @@
-export const BRAND_NAME = 'icy-disk';
+export const BRAND_NAME = 'Plotwise';
 export const BRAND_TAGLINE = 'Land records, IGR, and litigation intelligence';
 
 export const BRAND_COLORS = {

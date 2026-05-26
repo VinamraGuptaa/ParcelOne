@@ -218,20 +218,20 @@ export interface CaseRow {
 export interface Village {
   value: string;
   label: string;
-  english: string;
+  english?: string;
 }
 
 export interface Taluka {
   value: string;
   label: string;
-  english: string;
+  english?: string;
   villages: Village[];
 }
 
 export interface District {
   value: string;
   label: string;
-  english: string;
+  english?: string;
   talukas: Taluka[];
 }
 

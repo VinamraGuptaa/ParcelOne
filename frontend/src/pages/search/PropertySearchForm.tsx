@@ -4,9 +4,9 @@ import { apiPost, type BhulekhCatalog, type District, type Taluka, type Workflow
 
 const CATALOG_URL = '/data/bhulekh_catalog.json';
 
-function formatLabel(item: { label: string; english: string }): string {
-  const lab = item.label.trim();
-  const eng = item.english.trim();
+function formatLabel(item: { label?: string; english?: string }): string {
+  const lab = (item.label ?? '').trim();
+  const eng = (item.english ?? '').trim();
   if (!lab) return eng || '(unnamed)';
   if (!eng || eng.toLowerCase() === lab.toLowerCase()) return lab;
   return `${lab} (${eng})`;
@@ -84,7 +84,7 @@ export default function PropertySearchForm() {
         survey_option_label: surveyOption.trim(),
         owner_name: ownerName.trim() || null,
       });
-      window.dispatchEvent(new Event('icy-disk:refresh-sidebar'));
+      window.dispatchEvent(new Event('plotwise:refresh-sidebar'));
       navigate(`/report/workflow/${wf.workflow_id}`);
     } catch (err: unknown) {
       const e = err as Error & { status?: number; detail?: unknown };

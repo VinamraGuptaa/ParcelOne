@@ -22,8 +22,8 @@ export default function AppShell() {
         .then((d) => setWorkflows(d.workflows))
         .catch(() => {});
     }
-    window.addEventListener('icy-disk:refresh-sidebar', handleRefresh);
-    return () => window.removeEventListener('icy-disk:refresh-sidebar', handleRefresh);
+    window.addEventListener('plotwise:refresh-sidebar', handleRefresh);
+    return () => window.removeEventListener('plotwise:refresh-sidebar', handleRefresh);
   }, []);
 
   return (

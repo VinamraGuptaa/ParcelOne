@@ -232,7 +232,7 @@ Everything uses **icy-disk**:
 
 - Python package: `pyproject.toml` → `name = "icy-disk"`
 - Frontend package: `frontend/package.json` → `icy-disk-frontend`
-- UI brand: `frontend/src/config/brand.ts` → `BRAND_NAME = 'icy-disk'`
+- UI brand: `frontend/src/config/brand.ts` → `BRAND_NAME = 'Plotwise'` (browser tab title matches)
 - Docker image / ECS service: `icy-disk`
 
 Ensure the git remote points at your canonical **icy-disk** repository (update with `git remote set-url origin …` if migrating from an old name).
