@@ -20,11 +20,6 @@ function isTerminal(status: string): boolean {
   return s === 'ranked_done' || s === 'done' || s === 'completed' || s === 'succeeded';
 }
 
-function formatConfidence(confidence: number | null | undefined): string {
-  if (confidence == null) return '—';
-  return `${Math.round(confidence * 100)}%`;
-}
-
 function reportTitle(wf: WorkflowResponse): string {
   const village = wf.village_label?.trim();
   const survey = wf.survey_option_label?.trim();
@@ -211,7 +206,7 @@ function PollSummaryStrip({ wf }: { wf: WorkflowResponse }) {
         </div>
       </div>
       <div className="metric-cell">
-        <div className="metric-cell__label">Years Searched</div>
+        <div className="metric-cell__label">IGR Years Searched</div>
         <div className="metric-cell__value">{yearsLabel}</div>
       </div>
       <div className="metric-cell">
@@ -219,10 +214,6 @@ function PollSummaryStrip({ wf }: { wf: WorkflowResponse }) {
         <div className="metric-cell__value metric-cell__value--name">
           {wf.occupant_primary_name || '—'}
         </div>
-      </div>
-      <div className="metric-cell">
-        <div className="metric-cell__label">Confidence</div>
-        <div className="metric-cell__value">{formatConfidence(wf.extraction_confidence)}</div>
       </div>
     </div>
   );
@@ -381,7 +372,10 @@ function LitigationSection({ signals }: { signals: LitigationSignal[] }) {
             <div className="case-hit__rank">{s.final_rank ?? '—'}</div>
             <div>
               <div style={{ fontFamily: 'var(--f-prose)', fontSize: 14 }}>{s.parties || '—'}</div>
-              <div className="case-hit__cnr">{metaParts}</div>
+              {s.cnr_number ? (
+                <div className="case-hit__cnr">CNR {s.cnr_number}</div>
+              ) : null}
+              {metaParts ? <div className="case-hit__meta">{metaParts}</div> : null}
             </div>
             <div
               className="case-hit__score"

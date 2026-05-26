@@ -33,6 +33,57 @@ def test_contains_exact_survey_token_latin_and_devanagari_suffix_equivalent():
     assert _contains_exact_survey_token("Survey listed as 204/6A in document", "204/6अ") is True
 
 
+def test_rejects_557_when_it_is_area_from_calculation():
+    text = "घराची लांबी रुंदी 21.6 x 25.8 = 557 चौ.फुट पक्के बांधकाम"
+    assert _contains_exact_survey_token(text, "557") is False
+
+
+def test_rejects_557_in_prior_agreement_document_reference():
+    text = "पूर्वगामी करारानामा क्र.557/ 2019 दि. 28/02/2019"
+    assert _contains_exact_survey_token(text, "557") is False
+
+
+def test_rejects_bare_557_without_survey_label():
+    text = "property number 913/302 flat 302 building ramashray"
+    assert _contains_exact_survey_token(text, "557") is False
+
+
+def test_accepts_city_survey_number_with_label():
+    text = "मौजे खांदाड सि.स.नं. 1873 क्षेत्रफळ 75.8 चौ.मी."
+    assert _contains_exact_survey_token(text, "1873") is True
+
+
+def test_accepts_old_survey_number_with_label():
+    text = "जुना सर्वे नंबर 70/2ब नवीन गट 576/ ब"
+    assert _contains_exact_survey_token(text, "70/2") is False
+    assert _contains_exact_survey_token(text, "70/2ब") is True
+
+
+def test_accepts_gat_hissa_with_devanagari_suffix_for_latin_target():
+    text = "गट नंबर 204 हिस्सा नंबर 6अ"
+    assert _contains_exact_survey_token(text, "204/6A") is True
+
+
+def test_accepts_devanagari_digits_in_slash_notation():
+    text = "गट नंबर २०४/६अ"
+    assert _contains_exact_survey_token(text, "204/6A") is True
+
+
+def test_filters_full_target_survey_not_base_only():
+    """IGR portal search uses base 204; result filter must require full 204/6A."""
+    target = "204/6A"
+    assert _contains_exact_survey_token("गट नंबर 204 हिस्सा 6अ", target) is True
+    assert _contains_exact_survey_token("204/6A near village road", target) is True
+    assert _contains_exact_survey_token("गट नंबर 204 हिस्सा 3", target) is False
+    assert _contains_exact_survey_token("204/3", target) is False
+    assert _contains_exact_survey_token("गट 204 only", target) is False
+
+
+def test_still_matches_gat_hissa_notation():
+    text = "गट नंबर 1530 हिस्सा नंबर 3 जमीन"
+    assert _contains_exact_survey_token(text, "1530/3") is True
+
+
 def _mock_bhulekh():
     mock = MagicMock()
     mock.setup_driver = AsyncMock()
@@ -534,3 +585,20 @@ class TestLandCaseWorker:
             assert metrics.get("cache_hit") is True
             assert metrics.get("api_requests_saved", 0) >= 1
         await eng.dispose()
+
+
+def test_igr_years_span_2002_through_current():
+    from api.land_case_worker import _igr_years_from_2002_to_current
+
+    years = _igr_years_from_2002_to_current()
+    current = datetime.now().year
+    assert years[0] == str(current)
+    assert years[-1] == "2002"
+    assert len(years) == current - 2002 + 1
+
+
+def test_ecourts_stage_does_not_reset_igr_year_counters():
+    """years_total/years_done must stay at IGR values through eCourts completion."""
+    src = Path(__file__).resolve().parents[1].joinpath("api", "land_case_worker.py").read_text(encoding="utf-8")
+    assert "wf.years_total = 1" not in src
+    assert "wf.years_done = 1" not in src

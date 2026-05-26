@@ -1,13 +1,21 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { apiGet, type WorkflowSummary } from '../api/client';
+import { Link, useNavigate } from 'react-router-dom';
+import { apiGet, apiPost, type WorkflowResponse, type WorkflowSummary } from '../api/client';
 import StatusBadge from '../components/ui/StatusBadge';
 import { BRAND_NAME } from '../config/brand';
 
+function isFailed(status: string): boolean {
+  return status.toLowerCase() === 'failed';
+}
+
 export default function DashboardPage() {
+  const navigate = useNavigate();
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [retryError, setRetryError] = useState<string | null>(null);
+  const [activeWorkflowId, setActiveWorkflowId] = useState<string | null>(null);
 
   useEffect(() => {
     apiGet<{ workflows: WorkflowSummary[] }>('/workflows')
@@ -16,6 +24,42 @@ export default function DashboardPage() {
       .finally(() => setLoading(false));
   }, []);
 
+  async function handleRetry(wf: WorkflowSummary) {
+    setRetryError(null);
+    setActiveWorkflowId(null);
+    setRetryingId(wf.workflow_id);
+    try {
+      const created = await apiPost<WorkflowResponse>('/workflows/land-case-search', {
+        district_label: wf.district_label,
+        taluka_label: wf.taluka_label,
+        village_label: wf.village_label,
+        survey_part1: wf.survey_part1,
+        survey_option_label: wf.survey_option_label,
+        owner_name: wf.owner_name,
+      });
+      window.dispatchEvent(new Event('plotwise:refresh-sidebar'));
+      navigate(`/report/workflow/${created.workflow_id}`);
+    } catch (err: unknown) {
+      const e = err as Error & { status?: number; detail?: unknown };
+      if (e.status === 409) {
+        setRetryError('Another land workflow is already in progress. Wait for it to finish or view it below.');
+        const detail = e.detail;
+        if (
+          typeof detail === 'object' &&
+          detail !== null &&
+          'active_workflow_id' in detail &&
+          typeof (detail as { active_workflow_id: unknown }).active_workflow_id === 'string'
+        ) {
+          setActiveWorkflowId((detail as { active_workflow_id: string }).active_workflow_id);
+        }
+      } else {
+        setRetryError(e.message ?? 'Retry failed.');
+      }
+    } finally {
+      setRetryingId(null);
+    }
+  }
+
   return (
     <>
       <div className="eyebrow">{BRAND_NAME}</div>
@@ -23,6 +67,18 @@ export default function DashboardPage() {
       <p className="page-subtitle">Past land title intelligence reports</p>
 
       {error && <div className="error-banner">{error}</div>}
+      {retryError && (
+        <div className="error-banner">
+          {retryError}
+          {activeWorkflowId && (
+            <div className="mt-8">
+              <Link to={`/report/workflow/${activeWorkflowId}`} className="btn btn--secondary btn--sm">
+                View running report
+              </Link>
+            </div>
+          )}
+        </div>
+      )}
 
       {loading ? (
         <div style={{ paddingTop: 24 }}>
@@ -72,12 +128,31 @@ export default function DashboardPage() {
                   })}
                 </td>
                 <td className="td-action">
-                  <Link
-                    to={`/report/workflow/${wf.workflow_id}`}
-                    className="btn btn--secondary btn--sm"
-                  >
-                    View
-                  </Link>
+                  <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                    {isFailed(wf.status) && (
+                      <button
+                        type="button"
+                        className="btn btn--primary btn--sm"
+                        disabled={retryingId !== null}
+                        onClick={() => handleRetry(wf)}
+                      >
+                        {retryingId === wf.workflow_id ? (
+                          <>
+                            <span className="spinner" />
+                            Retrying…
+                          </>
+                        ) : (
+                          'Try again'
+                        )}
+                      </button>
+                    )}
+                    <Link
+                      to={`/report/workflow/${wf.workflow_id}`}
+                      className="btn btn--secondary btn--sm"
+                    >
+                      View
+                    </Link>
+                  </div>
                 </td>
               </tr>
             ))}

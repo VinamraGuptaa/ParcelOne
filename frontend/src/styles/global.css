@@ -609,6 +609,14 @@ input:disabled, select:disabled, textarea:disabled {
 .case-hit__cnr {
   font-family: var(--f-mono);
   font-size: 11px;
+  color: var(--ink);
+  margin-top: 4px;
+  letter-spacing: 0.02em;
+}
+
+.case-hit__meta {
+  font-family: var(--f-mono);
+  font-size: 11px;
   color: var(--ghost);
   margin-top: 3px;
 }

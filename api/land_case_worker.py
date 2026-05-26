@@ -69,10 +69,12 @@ _LATIN_TO_DEV_SUFFIX = {
     "d": "ड",
 }
 _DEV_TO_LATIN_SUFFIX = {v: k for k, v in _LATIN_TO_DEV_SUFFIX.items()}
+_DEV_TO_ASCII_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
 
 
-def _survey_token_variants(value: str) -> set[str]:
-    tok = _normalize_survey_token(value)
+def _suffix_variants(part: str) -> set[str]:
+    """Latin ↔ Devanagari suffix equivalents (e.g. 6A ↔ 6अ)."""
+    tok = (part or "").strip().lower()
     if not tok:
         return set()
     out = {tok}
@@ -91,6 +93,10 @@ def _survey_token_variants(value: str) -> set[str]:
     return out
 
 
+def _survey_token_variants(value: str) -> set[str]:
+    return _suffix_variants(_normalize_survey_token(value))
+
+
 def _row_get_any(row: dict, keys: list[str]) -> str:
     for k in keys:
         v = row.get(k)
@@ -105,7 +111,8 @@ def _row_get_any(row: dict, keys: list[str]) -> str:
 
 
 def _normalize_text(value: str) -> str:
-    return " ".join((value or "").strip().lower().split())
+    txt = (value or "").strip().lower().translate(_DEV_TO_ASCII_DIGITS)
+    return " ".join(txt.split())
 
 
 # Words that follow a plain number and indicate it is an AREA measurement,
@@ -133,36 +140,116 @@ _GAT_LABEL = (
 # Hissa/sub-survey separator — हिस्सा, भाग (part), or plain English "hissa"
 _HISSA_LABEL = r"(?:हिस्सा|हिस्से|hissa|हि\.?|ह\.?|भाग)\s*" + _NUM_LABEL
 
+# False-positive contexts: document/deed numbers, not survey identifiers.
+_DOC_REF_BEFORE = re.compile(
+    r"(?:"
+    r"करार(?:ानाम)?|अनुबंध|"
+    r"document|doc(?:ument)?|deed|"
+    r"registration|reg(?:istration)?|"
+    r"दस्त(?:ावेज)?|"
+    r"पूर्व(?:गाम)?(?:ी)?"
+    r")\s*(?:क्र\.?|क्रमांक|no\.?|num(?:ber)?)?\s*\.?\s*$",
+    re.IGNORECASE | re.UNICODE,
+)
+_KRAMANK_REF_BEFORE = re.compile(
+    r"(?:क्र\.?|क्रमांक|doc\s*no\.?|reg\s*no\.?)\s*\.?\s*$",
+    re.IGNORECASE | re.UNICODE,
+)
+_AREA_AFTER = re.compile(
+    r"^\s*(?:"
+    r"चौ\.?\s*(?:फु\.?|फुट|फु|मी\.?|मी)|"
+    r"sq\.?\s*(?:ft|feet|m|meter|metre)|"
+    r"square|feet|foot|"
+    + "|".join(re.escape(u) for u in sorted(_AREA_UNIT_TOKENS, key=len, reverse=True))
+    + r")",
+    re.IGNORECASE | re.UNICODE,
+)
+_CALC_EQUALS_BEFORE = re.compile(r"=\s*$")
+_CALC_EXPRESSION_BEFORE = re.compile(r"[\d.]+\s*[x×*]\s*[\d.]+\s*=\s*$", re.IGNORECASE)
+_YEAR_SLASH_AFTER = re.compile(r"^\s*/\s*20\d{2}\b")
+_CITY_SURVEY_LABEL_BEFORE = re.compile(
+    r"(?:सि\.?\s*स\.?\s*नं\.?|city\s*survey\s*(?:no\.?|num(?:ber)?)?)\s*$",
+    re.IGNORECASE | re.UNICODE,
+)
+_OLD_SURVEY_LABEL_BEFORE = re.compile(
+    r"(?:जूना\s*सर्वे|old\s*survey)\s*(?:नं\.?|no\.?|num(?:ber)?)?\s*$",
+    re.IGNORECASE | re.UNICODE,
+)
+_ENGLISH_SURVEY_LABEL_BEFORE = re.compile(
+    r"(?:survey|gat|gut)\s*(?:no\.?|num(?:ber)?)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _context_slice(hay: str, start: int, end: int, before: int = 45, after: int = 25) -> tuple[str, str]:
+    return hay[max(0, start - before):start], hay[end:end + after]
+
+
+def _gat_label_before(window: str) -> bool:
+    return bool(re.search(_GAT_LABEL + r"\s*$", window, re.IGNORECASE | re.UNICODE))
+
+
+def _has_required_survey_label(hay: str, start: int) -> bool:
+    """Bare numbers must appear next to an explicit survey/Gat/CS label."""
+    before, _ = _context_slice(hay, start, start)
+    return any(
+        (
+            _gat_label_before(before),
+            _CITY_SURVEY_LABEL_BEFORE.search(before),
+            _OLD_SURVEY_LABEL_BEFORE.search(before),
+            _ENGLISH_SURVEY_LABEL_BEFORE.search(before),
+        )
+    )
+
+
+def _accept_igr_survey_match(hay: str, start: int, end: int, survey_token: str) -> bool:
+    """Reject area calculations, deed/agreement numbers, and unlabeled bare digits."""
+    before, after = _context_slice(hay, start, end)
+
+    if _CALC_EQUALS_BEFORE.search(before) or _CALC_EXPRESSION_BEFORE.search(before):
+        return False
+    if _AREA_AFTER.match(after):
+        return False
+    if _DOC_REF_BEFORE.search(before) or _KRAMANK_REF_BEFORE.search(before):
+        return False
+    if "/" not in survey_token and _YEAR_SLASH_AFTER.match(after):
+        return False
+
+    if "/" in survey_token:
+        return True
+    return _has_required_survey_label(hay, start)
+
 
 def _contains_exact_survey_token(text: str, survey_token: str) -> bool:
     """
     Match a survey/Gat token inside an IGR Property Description.
 
-    Handles all real-world formats observed in Maharashtra IGR data:
-      1. Slash notation:      "1530/3"
-      2. Spaced slash:        "1530 / 3"
-      3. Marathi Gat+Hissa:   "गट नंबर 1530 हिस्सा नंबर 3"
-      4. Abbreviated Marathi: "गट क्र. 1530 हिस्सा क्र. 3"
-      5. English labels:      "Gut No. 1530 Hissa No. 3"
-
-    Avoids false positives when the number appears as an area measurement
-    (e.g. "1530 चौरस फूट" must NOT match survey 1530).
+    Handles slash notation, spaced slash, Marathi Gat+Hissa labels, and city/old
+    survey labels. Rejects false positives such as:
+      - Area calculations: "21.6 x 25.8 = 557 चौ.फुट"
+      - Prior agreement refs: "पूर्वगामी करारानामा क्र.557/ 2019"
+      - Bare numbers without a survey/Gat/CS label
     """
     hay = _normalize_text(text)
     toks = _survey_token_variants(survey_token)
     if not hay or not toks:
         return False
 
-    # ── 1. Exact slash-notation token (e.g. "1530/3") ────────────────────────
+    def _match_accepts(pattern: re.Pattern[str]) -> bool:
+        for m in pattern.finditer(hay):
+            if _accept_igr_survey_match(hay, m.start(), m.end(), survey_token):
+                return True
+        return False
+
+    # ── 1. Exact token (e.g. "1530/3" or labeled bare "सि.स.नं. 557") ───────
     for tok in toks:
-        pattern = re.compile(
+        exact = re.compile(
             rf"(?<![0-9a-z\u0900-\u097f]){re.escape(tok)}(?![0-9a-z\u0900-\u097f])",
             re.IGNORECASE,
         )
-        if pattern.search(hay):
+        if _match_accepts(exact):
             return True
 
-    # ── Extended formats only apply when token contains a sub-number ─────────
     if "/" not in survey_token:
         return False
 
@@ -172,44 +259,42 @@ def _contains_exact_survey_token(text: str, survey_token: str) -> bool:
     if not base or not hissa:
         return False
 
-    # Guard: base number must NOT be followed by an area unit word.
-    # "1530 चौरस फूट" is area in sq ft, NOT a Gat number.
-    area_false_positive = re.compile(
-        rf"(?<![0-9]){re.escape(base)}\s+({'|'.join(re.escape(u) for u in _AREA_UNIT_TOKENS)})",
-        re.IGNORECASE | re.UNICODE,
-    )
+    base_at = re.compile(rf"(?<![0-9]){re.escape(base)}")
+    hissa_variants = _suffix_variants(hissa)
+
+    def _match_accepts_with_base(pattern: re.Pattern[str]) -> bool:
+        for m in pattern.finditer(hay):
+            bm = base_at.search(hay, m.start(), m.end())
+            if bm and _accept_igr_survey_match(hay, bm.start(), bm.end(), survey_token):
+                return True
+        return False
 
     # ── 2. Spaced slash: "1530 / 3" ──────────────────────────────────────────
-    spaced = re.compile(
-        rf"(?<![0-9]){re.escape(base)}\s*/\s*{re.escape(hissa)}(?![0-9])",
-        re.IGNORECASE,
-    )
-    m = spaced.search(hay)
-    if m and not area_false_positive.search(hay):
-        return True
+    for hissa_tok in hissa_variants:
+        spaced = re.compile(
+            rf"(?<![0-9]){re.escape(base)}\s*/\s*{re.escape(hissa_tok)}(?![0-9a-z\u0900-\u097f])",
+            re.IGNORECASE,
+        )
+        if _match_accepts_with_base(spaced):
+            return True
 
-    # ── 3–5. Survey/Gat label + BASE + Hissa label + HISSA ───────────────────
-    # Matches: "गट नंबर 1530 हिस्सा नंबर 3"
-    #          "गट क्रमांक 1530 हिस्सा क्रमांक 3"
-    #          "गट क्र. 1530 हिस्सा क्र. 3"
-    #          "Gut No. 1530 Hissa No. 3"
-    #          "स.नं. 1530 हिस्सा 3"
-    #          "सर्वे नं. 1530 भाग 3"
-    gat_hissa = re.compile(
-        rf"{_GAT_LABEL}\s*{re.escape(base)}\s*{_HISSA_LABEL}\s*{re.escape(hissa)}(?![0-9])",
-        re.IGNORECASE | re.UNICODE,
-    )
-    if gat_hissa.search(hay) and not area_false_positive.search(hay):
-        return True
+    # ── 3–5. Gat label + BASE + Hissa label + HISSA ────────────────────────
+    for hissa_tok in hissa_variants:
+        gat_hissa = re.compile(
+            rf"{_GAT_LABEL}\s*{re.escape(base)}\s*{_HISSA_LABEL}\s*{re.escape(hissa_tok)}(?![0-9a-z\u0900-\u097f])",
+            re.IGNORECASE | re.UNICODE,
+        )
+        if _match_accepts_with_base(gat_hissa):
+            return True
 
-    # ── 6. Bare BASE + Hissa label + HISSA (no survey prefix) ────────────────
-    # Matches: "1530 हिस्सा 3",  "1530 भाग 3",  "1530 हिस्सा नंबर 3"
-    bare_hissa = re.compile(
-        rf"(?<![0-9]){re.escape(base)}\s+{_HISSA_LABEL}\s*{re.escape(hissa)}(?![0-9])",
-        re.IGNORECASE | re.UNICODE,
-    )
-    if bare_hissa.search(hay) and not area_false_positive.search(hay):
-        return True
+    # ── 6. Bare BASE + Hissa label + HISSA ───────────────────────────────────
+    for hissa_tok in hissa_variants:
+        bare_hissa = re.compile(
+            rf"(?<![0-9]){re.escape(base)}\s+{_HISSA_LABEL}\s*{re.escape(hissa_tok)}(?![0-9a-z\u0900-\u097f])",
+            re.IGNORECASE | re.UNICODE,
+        )
+        if _match_accepts_with_base(bare_hissa):
+            return True
 
     return False
 
@@ -567,7 +652,11 @@ def _write_unranked_csv(
 
 def _extract_igr_party_row_for_target_survey(row: dict, target_survey: str) -> dict | None:
     """
-    Keep only IGR rows where Property Description contains the target survey token.
+    Keep only IGR rows whose Property Description matches the full target survey
+    (e.g. ``204/6A``), not merely the base Gat number (``204``).
+
+    IGR portal search is intentionally broad (base number only); this filter
+    narrows results to the exact sub-survey the user selected.
     """
     target = _normalize_survey_token(target_survey)
     if not target:
@@ -1061,8 +1150,8 @@ async def run_land_case_workflow(workflow_id: str) -> None:
             wf = result.scalar_one()
             wf.status = "ecourts_running"
             wf.progress_message = "Searching eCourts via API..."
-            wf.years_total = 1
-            wf.years_done = 0
+            # Keep years_total / years_done from the IGR stage — they reflect registration
+            # years searched (2002→current), not eCourts API batch progress.
             await db.commit()
 
         if not _is_valid_ecourts_api_key(api_key):
@@ -1487,7 +1576,6 @@ async def run_land_case_workflow(workflow_id: str) -> None:
             wf.status = "ranked_done"
             wf.progress_message = f"Completed. Ranked {len(ranked)} cases by relevance."
             wf.ecourts_api_metrics_json = json.dumps(api_metrics, ensure_ascii=False) if api_metrics else None
-            wf.years_done = 1
             wf.finished_at = _now()
             await db.commit()
         logger.info("[workflow:%s] Workflow completed successfully.", workflow_id)

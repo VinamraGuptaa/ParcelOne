@@ -59,7 +59,6 @@ export interface WorkflowResponse {
   survey_option_label: string;
   owner_name: string | null;
   occupant_primary_name: string | null;
-  extraction_confidence: number | null;
   years_total: number;
   years_done: number;
   total_hits: number;
@@ -128,7 +127,6 @@ export interface LandEntity {
   occupant_primary_name: string | null;
   occupant_candidates: string[];
   mutation_numbers: string[];
-  extraction_confidence: number;
 }
 
 export interface WorkflowResults {

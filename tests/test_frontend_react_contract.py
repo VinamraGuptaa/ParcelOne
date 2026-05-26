@@ -158,6 +158,22 @@ def test_workflow_report_polls_terminal_statuses():
         assert status in report_src
 
 
+def test_dashboard_offers_retry_for_failed_workflows():
+    dashboard_src = _read(FRONTEND_SRC / "pages" / "DashboardPage.tsx")
+    assert "Try again" in dashboard_src
+    assert "/workflows/land-case-search" in dashboard_src
+    assert "failed" in dashboard_src.lower()
+    for field in (
+        "district_label",
+        "taluka_label",
+        "village_label",
+        "survey_part1",
+        "survey_option_label",
+        "owner_name",
+    ):
+        assert field in dashboard_src
+
+
 def test_property_form_handles_409_conflict():
     form_src = _read(FRONTEND_SRC / "pages" / "search" / "PropertySearchForm.tsx")
     assert "409" in form_src
