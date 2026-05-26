@@ -1,5 +1,18 @@
-# ── eCourts Scraper — GCP/Cloud Run friendly Docker image ─────────────────
-# Uses python:3.11-slim and installs Playwright Chromium with required libs.
+# ── icy-disk — AWS-friendly Docker image ─────────────────────────────────────
+# Stage 1: build the React SPA (same-origin /api in production).
+# Stage 2: Python backend + Playwright Chromium + prebuilt frontend/dist.
+
+FROM node:22-slim AS frontend-build
+
+WORKDIR /app/frontend
+
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ ./
+ENV VITE_API_BASE=/api
+RUN npm run build
+
 
 FROM python:3.11-slim
 
@@ -38,9 +51,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy project files
 COPY pyproject.toml uv.lock ./
 COPY . .
+
+# React build output from stage 1 (overwrites empty/missing local dist)
+COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 
 # Install uv and project dependencies
 # Force opencv-python-headless over full opencv to avoid display/GPU crashes
@@ -55,7 +70,7 @@ RUN uv run playwright install chromium
 
 # Pre-download RapidOCR ONNX models so they're cached in the image.
 # Without this, first captcha solve downloads ~15MB at runtime, causing
-# a ~60s delay that can trigger Render's health check timeout.
+# a long cold-start delay on container health checks.
 RUN uv run python -c "from rapidocr_onnxruntime import RapidOCR; RapidOCR()"
 
 # Run as non-root in deployed containers.

@@ -95,11 +95,59 @@ class TestWorkflowApi:
             }
             resp = await client.post("/api/workflows/land-case-search", json=payload)
         assert resp.status_code == 409
-        assert "already in progress" in resp.json()["detail"]
+        detail = resp.json()["detail"]
+        assert "already in progress" in (detail["message"] if isinstance(detail, dict) else detail)
+        if isinstance(detail, dict):
+            assert "active_workflow_id" in detail
 
     async def test_get_unknown_workflow_404(self, client):
         resp = await client.get("/api/workflows/not-found")
         assert resp.status_code == 404
+
+    async def test_list_workflows_returns_valid_shape(self, client):
+        resp = await client.get("/api/workflows")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "workflows" in body
+        assert "total" in body
+        assert isinstance(body["workflows"], list)
+        assert isinstance(body["total"], int)
+        assert len(body["workflows"]) <= body["total"]
+
+    async def test_list_workflows_returns_summaries(self, client, engine):
+        from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+        from api.models import LandCaseWorkflow
+
+        Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        created_id = None
+        async with Session() as session:
+            wf_obj = LandCaseWorkflow(
+                district_label="Pune",
+                taluka_label="Haveli",
+                village_label="Wagholi_list_test",
+                survey_part1="9999",
+                survey_option_label="9999/list",
+                status="ranked_done",
+                progress_message="Done.",
+                total_hits=2,
+            )
+            session.add(wf_obj)
+            await session.commit()
+            await session.refresh(wf_obj)
+            created_id = wf_obj.id
+
+        resp = await client.get("/api/workflows")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] >= 1
+        # Find the specific workflow we created by id.
+        match = next((w for w in body["workflows"] if w["workflow_id"] == created_id), None)
+        assert match is not None, f"Created workflow {created_id} not found in list"
+        assert match["village_label"] == "Wagholi_list_test"
+        assert match["survey_option_label"] == "9999/list"
+        assert match["status"] == "ranked_done"
+        assert match["total_hits"] == 2
+        assert "created_at" in match
 
     async def test_results_and_artifacts_shape(self, client, engine):
         from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession

@@ -29,7 +29,12 @@ from typing import Any, Optional
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
-from playwright_launch_args import chromium_launch_args
+from playwright_launch_args import (
+    chromium_launch_args,
+    ensure_playwright_browsers_path,
+    resolve_chromium_executable,
+    resolve_system_chromium_executable,
+)
 
 # Bhulekh previously used 3-7s random sleeps per interaction, which makes one run
 # very slow because this helper is called many times in sequence. Keep anti-burst
@@ -154,33 +159,8 @@ class BhulekhScraper:
         self.page: Optional[Page] = None
 
     async def setup_driver(self) -> None:
-        def _resolve_chromium_executable() -> str | None:
-            explicit = (os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH") or "").strip()
-            if explicit and Path(explicit).exists():
-                return explicit
-            return None
-
-        def _resolve_system_chromium_executable() -> str | None:
-            candidates = (
-                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                "/Applications/Chromium.app/Contents/MacOS/Chromium",
-            )
-            for c in candidates:
-                if Path(c).exists():
-                    return c
-            return None
-
-        project_browsers_path = str((Path(__file__).resolve().parent / ".playwright-browsers").resolve())
-        browsers_path_env = (os.getenv("PLAYWRIGHT_BROWSERS_PATH") or "").strip()
-        if not browsers_path_env or "cursor-sandbox-cache" in browsers_path_env:
-            # Use a repo-local path that stays writable/stable across Cursor
-            # sandbox hash changes and avoids user-home permission edge cases.
-            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = project_browsers_path
-            logger.warning(
-                "Using PLAYWRIGHT_BROWSERS_PATH=%s (previous=%r)",
-                project_browsers_path,
-                browsers_path_env or None,
-            )
+        browsers_path = ensure_playwright_browsers_path()
+        logger.info("Using PLAYWRIGHT_BROWSERS_PATH=%s", browsers_path)
 
         async def _install_playwright_chromium(*, original_error: str = "") -> None:
             auto_install = (os.getenv("PLAYWRIGHT_AUTO_INSTALL") or "").strip().lower() in {
@@ -256,13 +236,11 @@ class BhulekhScraper:
             "true",
             "yes",
         }
-        explicit_executable_path = _resolve_chromium_executable()
-        playwright_executable_path = (self._playwright.chromium.executable_path or "").strip()
-        executable_path = explicit_executable_path or (playwright_executable_path if Path(playwright_executable_path).exists() else None)
-        if explicit_executable_path:
-            logger.info("Using explicit Chromium executable at %s", explicit_executable_path)
-        elif executable_path:
-            logger.info("Using Playwright Chromium executable at %s", executable_path)
+        executable_path = resolve_chromium_executable(
+            playwright_executable_path=(self._playwright.chromium.executable_path or "")
+        )
+        if executable_path:
+            logger.info("Using Chromium executable at %s", executable_path)
         browser_home = (Path(__file__).resolve().parent / ".playwright-home").resolve()
         browser_tmp = (Path(__file__).resolve().parent / ".playwright-tmp").resolve()
         browser_home.mkdir(parents=True, exist_ok=True)
@@ -287,26 +265,29 @@ class BhulekhScraper:
         except Exception as exc:
             if _is_missing_executable_error(exc):
                 msg = str(exc).lower()
-                if "chrome-headless-shell-mac-x64" in msg:
+                if "chrome-headless-shell-mac-x64" in msg or "executable doesn't exist" in msg:
                     allow_system = (os.getenv("PLAYWRIGHT_ALLOW_SYSTEM_EXECUTABLE") or "").strip().lower() in {"1", "true", "yes"}
-                    system_executable = (executable_path or _resolve_system_chromium_executable()) if allow_system else None
-                    if not system_executable:
-                        await _install_playwright_chromium(original_error=str(exc))
-                        launch_kwargs = {"headless": self.headless, "args": launch_args, "env": browser_env}
-                        if executable_path:
-                            launch_kwargs["executable_path"] = executable_path
-                        self.browser = await self._playwright.chromium.launch(**launch_kwargs)
-                    else:
+                    fallback_executable = resolve_chromium_executable() or (
+                        resolve_system_chromium_executable() if allow_system else None
+                    )
+                    if fallback_executable:
                         logger.warning(
-                            "Headless shell x64 binary missing; retrying Bhulekh launch with system Chromium fallback (headless=%s).",
-                            self.headless,
+                            "Playwright default Chromium path missing; retrying with %s",
+                            fallback_executable,
                         )
                         launch_kwargs = {
                             "headless": self.headless,
                             "args": launch_args,
                             "env": browser_env,
-                            "executable_path": system_executable,
+                            "executable_path": fallback_executable,
                         }
+                        self.browser = await self._playwright.chromium.launch(**launch_kwargs)
+                    else:
+                        await _install_playwright_chromium(original_error=str(exc))
+                        launch_kwargs = {"headless": self.headless, "args": launch_args, "env": browser_env}
+                        resolved = resolve_chromium_executable()
+                        if resolved:
+                            launch_kwargs["executable_path"] = resolved
                         self.browser = await self._playwright.chromium.launch(**launch_kwargs)
                 else:
                     await _install_playwright_chromium(original_error=str(exc))

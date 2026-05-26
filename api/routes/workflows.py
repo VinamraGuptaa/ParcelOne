@@ -43,6 +43,8 @@ from api.schemas import (
     NameVariantResponse,
     WorkflowCaseHitResponse,
     WorkflowIgrHitResponse,
+    WorkflowListResponse,
+    WorkflowSummaryResponse,
 )
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
@@ -323,6 +325,44 @@ def _resolve_artifact_path(workflow_id: str, kind: str, wf: LandCaseWorkflow) ->
     return None
 
 
+@router.get("", response_model=WorkflowListResponse)
+async def list_land_case_workflows(
+    limit: int = 20,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    from sqlalchemy import func
+    count_result = await db.execute(select(func.count()).select_from(LandCaseWorkflow))
+    total = count_result.scalar_one()
+
+    result = await db.execute(
+        select(LandCaseWorkflow)
+        .order_by(LandCaseWorkflow.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    workflows = result.scalars().all()
+    return WorkflowListResponse(
+        workflows=[
+            WorkflowSummaryResponse(
+                workflow_id=wf.id,
+                status=wf.status,
+                district_label=wf.district_label,
+                taluka_label=wf.taluka_label,
+                village_label=wf.village_label,
+                survey_part1=wf.survey_part1,
+                survey_option_label=wf.survey_option_label or "",
+                owner_name=wf.owner_name_input,
+                total_hits=wf.total_hits,
+                created_at=wf.created_at,
+                finished_at=wf.finished_at,
+            )
+            for wf in workflows
+        ],
+        total=total,
+    )
+
+
 @router.post("/land-case-search", status_code=202, response_model=LandCaseWorkflowResponse)
 async def create_land_case_workflow(
     body: LandCaseWorkflowCreateRequest,
@@ -358,7 +398,10 @@ async def create_land_case_workflow(
         )
         raise HTTPException(
             status_code=409,
-            detail="Another land workflow is already in progress. Please try again shortly.",
+            detail={
+                "message": "Another land workflow is already in progress. Please try again shortly.",
+                "active_workflow_id": active_workflow_id,
+            },
         )
 
     wf = LandCaseWorkflow(

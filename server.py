@@ -1,7 +1,7 @@
 """
 Entry point: python server.py
 
-Reads PORT from environment (Render injects this automatically).
+Reads PORT from the environment (ECS/Fargate, Cloud Run, etc.).
 """
 
 import logging

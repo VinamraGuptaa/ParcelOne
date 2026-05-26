@@ -1,7 +1,7 @@
 [project]
 name = "icy-disk"
 version = "0.1.0"
-description = "Add your description here"
+description = "icy-disk — land records (Bhulekh), IGR, and eCourts litigation intelligence for Maharashtra property due diligence"
 requires-python = ">=3.11"
 dependencies = [
     "aiosqlite>=0.22.1",

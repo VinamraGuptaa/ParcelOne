@@ -340,3 +340,23 @@ class LandCaseWorkflowArtifactsResponse(BaseModel):
     pdf_path: Optional[str]
     html_path: Optional[str]
     ranked_csv_path: Optional[str]
+
+
+class WorkflowSummaryResponse(BaseModel):
+    """Lightweight workflow summary used in list endpoints and sidebar."""
+    workflow_id: str
+    status: str
+    district_label: str
+    taluka_label: str
+    village_label: str
+    survey_part1: str
+    survey_option_label: str
+    owner_name: Optional[str]
+    total_hits: int
+    created_at: datetime
+    finished_at: Optional[datetime]
+
+
+class WorkflowListResponse(BaseModel):
+    workflows: list[WorkflowSummaryResponse]
+    total: int

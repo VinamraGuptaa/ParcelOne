@@ -1,9 +1,8 @@
 /**
  * eCourts India Case Scraper — Frontend
  *
- * API_BASE: set to "/api" for same-origin (local dev / Render serving static).
- * When the frontend is deployed on Netlify/Vercel, update this to the full
- * Render backend URL, e.g. "https://ecourts-api.onrender.com/api"
+ * API_BASE: set to "/api" for same-origin (local dev / Docker on AWS).
+ * When the UI is hosted on a separate origin, set VITE_API_BASE at build time.
  */
 const API_BASE = "/api";
 const POLL_INTERVAL_MS = 3000;
@@ -54,7 +53,7 @@ async function reattachRunningJob() {
   startPolling(currentJobId);
 }
 
-// ── Server health (handles Render cold start) ────────────────────────────
+// ── Server health (handles container cold start) ─────────────────────────
 async function checkServerHealth() {
   const start = Date.now();
   try {

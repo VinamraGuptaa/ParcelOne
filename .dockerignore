@@ -17,3 +17,5 @@ artifacts/
 ms-playwright/
 tests/
 agent-transcripts/
+frontend/node_modules/
+frontend/dist/

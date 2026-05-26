@@ -1,7 +1,11 @@
-"""Contract tests for the static frontend assets.
+"""Contract tests for the legacy static frontend assets.
 
-These tests are intentionally lightweight and avoid a browser runtime.
-They lock down:
+These tests cover ``static/index.html`` and ``static/app.js`` — the vanilla JS UI
+that predates the React frontend in ``frontend/``.  They remain active as a
+regression guard for the legacy files until ``static/`` is removed after the React
+SPA reaches production parity.
+
+Tests are intentionally lightweight and avoid a browser runtime.  They lock down:
 - required form fields and element ids in ``static/index.html``
 - key API route usage and workflow behaviors in ``static/app.js``
 """

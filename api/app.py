@@ -3,8 +3,9 @@
 import logging
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
@@ -25,7 +26,7 @@ def create_app() -> FastAPI:
         redoc_url=None,
     )
 
-    # CORS — allow the Netlify/Vercel frontend origin
+    # CORS — allow configured frontend origins (comma-separated in CORS_ORIGINS)
     origins_env = os.getenv("CORS_ORIGINS", "*")
     origins = [o.strip() for o in origins_env.split(",") if o.strip()]
 
@@ -214,9 +215,34 @@ def create_app() -> FastAPI:
     app.include_router(cases_router, prefix="/api")
     app.include_router(workflows_router, prefix="/api")
 
-    # Serve frontend static files — must come last so API routes take priority
-    static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
-    if os.path.isdir(static_dir):
-        app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+    # Serve frontend — API routes above take priority.
+    # React dist (Docker / npm run build): SPA catch-all for deep links on AWS.
+    # Legacy static/: simple mount when no React build is present (local dev).
+    repo_root = os.path.dirname(os.path.dirname(__file__))
+    react_dist = os.path.join(repo_root, "frontend", "dist")
+    legacy_static = os.path.join(repo_root, "static")
+
+    if os.path.isdir(react_dist):
+        assets_dir = os.path.join(react_dist, "assets")
+        if os.path.isdir(assets_dir):
+            app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+        data_dir = os.path.join(react_dist, "data")
+        if os.path.isdir(data_dir):
+            app.mount("/data", StaticFiles(directory=data_dir), name="spa-data")
+
+        @app.get("/{full_path:path}", include_in_schema=False)
+        async def spa_catch_all(full_path: str):
+            if full_path.startswith("api/") or full_path.startswith("api"):
+                raise HTTPException(status_code=404, detail="Not found.")
+            if full_path:
+                candidate = os.path.join(react_dist, full_path)
+                if os.path.isfile(candidate):
+                    return FileResponse(candidate)
+            index = os.path.join(react_dist, "index.html")
+            if os.path.isfile(index):
+                return FileResponse(index)
+            raise HTTPException(status_code=404, detail="Not found.")
+    elif os.path.isdir(legacy_static):
+        app.mount("/", StaticFiles(directory=legacy_static, html=True), name="static")
 
     return app
