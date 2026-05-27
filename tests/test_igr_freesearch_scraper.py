@@ -107,3 +107,29 @@ def test_save_raw_search_html_skipped_by_default(monkeypatch):
         "<html></html>", survey_number="70", year="2020", attempt=1
     )
     assert out is None
+
+
+def test_registration_grid_pager_pages_from_saved_html():
+    from pathlib import Path
+
+    html_path = Path("artifacts/igr_debug/igr_2025_204_attempt2.html")
+    if not html_path.exists():
+        return
+    html = html_path.read_text(encoding="utf-8")
+    current, pages = IGRFreeSearchScraper._registration_grid_pager_pages(html)
+    assert current == 1
+    assert 2 in pages
+    assert max(pages) >= 10
+
+
+def test_parse_registration_grid_excludes_pager_row():
+    from pathlib import Path
+
+    html_path = Path("artifacts/igr_debug/igr_2025_204_attempt2.html")
+    if not html_path.exists():
+        return
+    html = html_path.read_text(encoding="utf-8")
+    rows = IGRFreeSearchScraper._parse_registration_grid(html)
+    assert len(rows) >= 10
+    assert all(r.get("DocNo") for r in rows)
+    assert all("Page$" not in (r.get("_row_text") or "") for r in rows)

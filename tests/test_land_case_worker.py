@@ -69,6 +69,13 @@ def test_accepts_devanagari_digits_in_slash_notation():
     assert _contains_exact_survey_token(text, "204/6A") is True
 
 
+def test_accepts_comma_separated_hissa_notation():
+    text = "204,हिस्सा नं. 6अ,यांस"
+    assert _contains_exact_survey_token(text, "204/6A") is True
+    assert _contains_exact_survey_token("204, हिस्सा नं. 6A", "204/6A") is True
+    assert _contains_exact_survey_token("204,हिस्सा 7/1", "204/6A") is False
+
+
 def test_filters_full_target_survey_not_base_only():
     """IGR portal search uses base 204; result filter must require full 204/6A."""
     target = "204/6A"

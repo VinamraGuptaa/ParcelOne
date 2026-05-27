@@ -296,6 +296,15 @@ def _contains_exact_survey_token(text: str, survey_token: str) -> bool:
         if _match_accepts_with_base(bare_hissa):
             return True
 
+    # ── 7. Comma-separated: "204,हिस्सा नं. 6अ" (common IGR list notation) ───
+    for hissa_tok in hissa_variants:
+        comma_hissa = re.compile(
+            rf"(?<![0-9]){re.escape(base)}\s*,\s*{_HISSA_LABEL}\s*{re.escape(hissa_tok)}(?![0-9a-z\u0900-\u097f])",
+            re.IGNORECASE | re.UNICODE,
+        )
+        if _match_accepts_with_base(comma_hissa):
+            return True
+
     return False
 
 
