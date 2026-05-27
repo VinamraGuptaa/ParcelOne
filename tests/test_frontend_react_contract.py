@@ -154,8 +154,17 @@ def test_workflow_summary_fields_match_schema():
 
 def test_workflow_report_polls_terminal_statuses():
     report_src = _read(FRONTEND_SRC / "pages" / "WorkflowReportPage.tsx")
-    for status in ("ranked_done", "failed"):
+    for status in ("ranked_done", "failed", "cancelled"):
         assert status in report_src
+    assert "Cancel" in report_src
+    assert "Try again" in report_src
+
+
+def test_workflow_actions_exposes_cancel_and_restart():
+    actions_src = _read(FRONTEND_SRC / "lib" / "workflowActions.ts")
+    assert "cancelWorkflow" in actions_src
+    assert "restartLandCaseWorkflow" in actions_src
+    assert "/cancel" in actions_src
 
 
 def test_dashboard_offers_retry_for_failed_workflows():

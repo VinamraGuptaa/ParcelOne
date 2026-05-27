@@ -104,6 +104,60 @@ class TestWorkflowApi:
         resp = await client.get("/api/workflows/not-found")
         assert resp.status_code == 404
 
+    async def test_cancel_active_workflow_marks_cancelled(self, client, engine):
+        from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+        from api.models import LandCaseWorkflow
+
+        Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        created_id = None
+        async with Session() as session:
+            wf_obj = LandCaseWorkflow(
+                district_label="Pune",
+                taluka_label="Haveli",
+                village_label="Wagholi",
+                survey_part1="1530",
+                survey_option_label="1530/3",
+                status="igr_running",
+                progress_message="Searching IGR…",
+            )
+            session.add(wf_obj)
+            await session.commit()
+            await session.refresh(wf_obj)
+            created_id = wf_obj.id
+
+        resp = await client.post(f"/api/workflows/{created_id}/cancel", json={})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "cancelled"
+        assert body["progress_message"] == "Cancelled by user."
+        assert body["finished_at"] is not None
+
+    async def test_cancel_completed_workflow_returns_400(self, client, engine):
+        from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+        from api.models import LandCaseWorkflow
+
+        Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        created_id = None
+        async with Session() as session:
+            wf_obj = LandCaseWorkflow(
+                district_label="Pune",
+                taluka_label="Haveli",
+                village_label="Wagholi",
+                survey_part1="1530",
+                survey_option_label="1530/3",
+                status="ranked_done",
+                progress_message="Done.",
+            )
+            session.add(wf_obj)
+            await session.commit()
+            await session.refresh(wf_obj)
+            created_id = wf_obj.id
+
+        resp = await client.post(f"/api/workflows/{created_id}/cancel", json={})
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "not running" in detail["message"].lower() or "in-progress" in detail["message"].lower()
+
     async def test_list_workflows_returns_valid_shape(self, client):
         resp = await client.get("/api/workflows")
         assert resp.status_code == 200

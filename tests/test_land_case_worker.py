@@ -53,6 +53,14 @@ def test_accepts_city_survey_number_with_label():
     assert _contains_exact_survey_token(text, "1873") is True
 
 
+def test_accepts_abbreviated_gat_number_label():
+    assert _contains_exact_survey_token("मिळकत ग.नं 970 बाणेर", "970") is True
+    assert _contains_exact_survey_token("ग. नं. 970", "970") is True
+    assert _contains_exact_survey_token("ग.नं970", "970") is True
+    assert _contains_exact_survey_token("ग.नं 970 हिस्सा 3", "970/3") is True
+    assert _contains_exact_survey_token("area 970 sqft", "970") is False
+
+
 def test_accepts_old_survey_number_with_label():
     text = "जुना सर्वे नंबर 70/2ब नवीन गट 576/ ब"
     assert _contains_exact_survey_token(text, "70/2") is False

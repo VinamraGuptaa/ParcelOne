@@ -438,6 +438,34 @@ async def get_land_case_workflow(
     return _workflow_to_response(wf)
 
 
+@router.post("/{workflow_id}/cancel", response_model=LandCaseWorkflowResponse)
+async def cancel_land_case_workflow(
+    workflow_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(LandCaseWorkflow).where(LandCaseWorkflow.id == workflow_id))
+    wf = result.scalar_one_or_none()
+    if wf is None:
+        logger.warning("Workflow cancel requested but not found: workflow_id=%s", workflow_id)
+        raise HTTPException(status_code=404, detail="Workflow not found.")
+    if wf.status not in ACTIVE_WORKFLOW_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Only an in-progress workflow can be cancelled.",
+                "status": wf.status,
+            },
+        )
+    wf.status = "cancelled"
+    wf.progress_message = "Cancelled by user."
+    wf.error_message = None
+    wf.finished_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(wf)
+    logger.info("Workflow cancelled: workflow_id=%s", workflow_id)
+    return _workflow_to_response(wf)
+
+
 @router.get("/{workflow_id}/results", response_model=LandCaseWorkflowResultsResponse)
 async def get_land_case_workflow_results(
     workflow_id: str,
@@ -567,6 +595,7 @@ async def get_land_case_workflow_results(
         raw_api_cases,
         key=lambda row: (row.final_rank is None, row.final_rank or 10**9, row.id),
     )
+    ranked_api_cases = [c for c in raw_api_cases_sorted if c.final_rank is not None]
     api_cases = [
         EcourtsApiCaseResponse(
             cnr_number=c.cnr_number,
@@ -598,13 +627,13 @@ async def get_land_case_workflow_results(
             source_stage=c.source_stage,
             raw=json.loads(c.raw_json or "{}"),
         )
-        for c in raw_api_cases_sorted
+        for c in ranked_api_cases
     ]
 
     # ── Due-diligence report data ─────────────────────────────────────────
     dd = _build_due_diligence(
         igr_rows=igr_rows,
-        raw_api_cases=raw_api_cases_sorted,
+        raw_api_cases=ranked_api_cases,
         occupant_primary_name=entity_response.occupant_primary_name if entity_response else None,
     )
 

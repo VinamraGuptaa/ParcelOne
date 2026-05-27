@@ -6,6 +6,7 @@ function statusClass(status: string): string {
   const s = status.toLowerCase();
   if (s === 'done' || s === 'ranked_done' || s === 'completed' || s === 'succeeded') return 'badge--done';
   if (s === 'failed') return 'badge--failed';
+  if (s === 'cancelled') return 'badge--cancelled';
   if (s === 'running' || s.includes('running')) return 'badge--running';
   return 'badge--pending';
 }
@@ -13,6 +14,7 @@ function statusClass(status: string): string {
 function statusLabel(status: string): string {
   const s = status.toLowerCase();
   if (s === 'ranked_done') return 'RANKED_DONE';
+  if (s === 'cancelled') return 'Cancelled';
   if (s.includes('running')) return 'Running';
   if (s === 'pending_input') return 'Pending';
   return status.replace(/_/g, ' ');

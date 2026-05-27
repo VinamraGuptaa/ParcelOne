@@ -42,6 +42,10 @@ LOCATION_ALIASES = {
     "पुणे": ("pune",),
     "haveli": ("हवेली",),
     "हवेली": ("haveli",),
+    "shirur": ("शिरूर",),
+    "शिरूर": ("shirur",),
+    "talegaon dhamdhere": ("तालेगाव धामधरे",),
+    "तालेगाव धामधरे": ("talegaon dhamdhere",),
 }
 
 
@@ -81,6 +85,10 @@ class RankedCaseHit:
     # 1.0 = all names on that side are owners (pure individual / group case).
     # < 1.0 = strangers are mixed in on the same side.
     owner_side_purity: float = 0.0
+    village_location_score: float = 0.0
+    taluka_location_score: float = 0.0
+    district_location_score: float = 0.0
+    is_pending: bool = False
 
 
 def _normalize_name(name: str) -> str:
@@ -119,7 +127,7 @@ def _owner_side_purity(rec: dict, variants: list[str]) -> float:
             continue
         matched_on_side = sum(
             1 for name in side
-            if any(owner_name_exact_in_parties(name, v) for v in variants)
+            if any(_names_exact_equivalent(name, v) for v in variants)
         )
         if matched_on_side > 0:
             best = max(best, matched_on_side / len(side))
@@ -134,6 +142,9 @@ def owner_name_exact_in_parties(parties_text: str, owner: str) -> bool:
       not match inside "lata arun narke" as a substring typo/prefix).
     - Single-token owners: must match a whole token in the party string (so "a"
       does not match inside "alice").
+
+    Prefer record_matches_owner_names_exact() for eCourts ranking — it requires
+    a full-name match on an individual petitioner/respondent entry.
     """
     hay = _normalize_name(parties_text)
     vn = _normalize_name(owner)
@@ -152,13 +163,84 @@ def owner_name_exact_in_parties(parties_text: str, owner: str) -> bool:
     return False
 
 
+def _names_exact_equivalent(left: str, right: str) -> bool:
+    """True when two party/owner names are the same person (spacing/case tolerant)."""
+    left_norm = _normalize_name(left)
+    right_norm = _normalize_name(right)
+    if not left_norm or not right_norm:
+        return False
+    if left_norm == right_norm:
+        return True
+    if left_norm.replace(" ", "") == right_norm.replace(" ", ""):
+        return True
+    left_toks = left_norm.split()
+    right_toks = right_norm.split()
+    return len(left_toks) == len(right_toks) and left_toks == right_toks
+
+
+def _split_party_side(side: str) -> list[str]:
+    txt = (side or "").strip()
+    if not txt or txt.lower() in {"nil", "na", "n/a", "-", "none"}:
+        return []
+    parts = [p.strip() for p in re.split(r",|;|\band\b|&", txt, flags=re.I) if p.strip()]
+    return parts or [txt]
+
+
+def _extract_individual_party_names(rec: dict) -> list[str]:
+    """Return one entry per petitioner/respondent party (not combined blob)."""
+    names: list[str] = []
+    for key in ("petitioners", "respondents"):
+        value = rec.get(key)
+        if not isinstance(value, list):
+            continue
+        for entry in value:
+            names.extend(_split_party_side(str(entry)))
+    if names:
+        return list(dict.fromkeys(n for n in names if n))
+
+    parties = (
+        rec.get("parties_text")
+        or rec.get("parties")
+        or rec.get("Petitioner Name versus Respondent Name")
+        or ""
+    )
+    if isinstance(parties, str) and parties.strip():
+        if re.search(r"\s+vs\.?\s+", parties, flags=re.I):
+            lhs, rhs = re.split(r"\s+vs\.?\s+", parties, maxsplit=1, flags=re.I)
+            names.extend(_split_party_side(lhs))
+            names.extend(_split_party_side(rhs))
+        else:
+            names.extend(_split_party_side(parties))
+    return list(dict.fromkeys(n for n in names if n))
+
+
+def record_matches_owner_names_exact(rec: dict, owner_names: list[str]) -> bool:
+    """True when any 7/12 owner name exactly matches an individual party entry."""
+    party_names = _extract_individual_party_names(rec)
+    owners = [o.strip() for o in owner_names if isinstance(o, str) and o.strip()]
+    if not party_names or not owners:
+        return False
+    return any(
+        _names_exact_equivalent(owner, party)
+        for owner in owners
+        for party in party_names
+    )
+
+
 def score_owner_variants_exact_phrase(
-    parties_text: str, variants: list[str]
+    parties_or_rec: str | dict, variants: list[str]
 ) -> tuple[float, str | None, str]:
-    """Best score across owner variants using exact phrase / whole-token rules only."""
-    for v in variants:
-        if isinstance(v, str) and v.strip() and owner_name_exact_in_parties(parties_text, v):
-            return 1.0, v, "exact_phrase"
+    """Best score across owner variants using exact full-name party matching only."""
+    if isinstance(parties_or_rec, dict):
+        party_names = _extract_individual_party_names(parties_or_rec)
+    else:
+        party_names = _extract_individual_party_names({"parties_text": parties_or_rec})
+    for variant in variants:
+        if not isinstance(variant, str) or not variant.strip():
+            continue
+        for party in party_names:
+            if _names_exact_equivalent(variant, party):
+                return 1.0, variant, "exact_party"
     return 0.0, None, "no_exact_match"
 
 
@@ -543,6 +625,79 @@ def _district_court_overlap_score(court_text: str, district_label: str) -> float
     return round(min(overlap, 1.0), 4)
 
 
+def _location_label_variants(label: str) -> list[str]:
+    """Build location strings to match inside court names (Latin + Devanagari)."""
+    variants: list[str] = []
+    raw = (label or "").strip().lower()
+    if raw:
+        variants.append(raw)
+    norm = _normalize_name(label or "")
+    if norm and norm not in variants:
+        variants.append(norm)
+    for v in list(variants):
+        compact = v.replace(" ", "")
+        if compact and compact not in variants:
+            variants.append(compact)
+    for key in {(label or "").strip().lower(), norm}:
+        if not key:
+            continue
+        for alias in LOCATION_ALIASES.get(key, ()):
+            alias_raw = alias.strip()
+            if not alias_raw:
+                continue
+            alias_lower = alias_raw.lower()
+            if alias_lower not in variants:
+                variants.append(alias_lower)
+            alias_compact = alias_lower.replace(" ", "")
+            if alias_compact and alias_compact not in variants:
+                variants.append(alias_compact)
+    return list(dict.fromkeys(v for v in variants if v))
+
+
+def _location_token_overlap(court_text: str, label: str) -> float:
+    court_norm = _normalize_name(court_text or "")
+    if not court_norm:
+        return 0.0
+    court_compact = court_norm.replace(" ", "")
+    variants = _location_label_variants(label)
+    if not variants:
+        return 0.0
+
+    for variant in variants:
+        variant_norm = _normalize_name(variant)
+        variant_compact = variant_norm.replace(" ", "") if variant_norm else variant.replace(" ", "")
+        if variant_norm and (variant_norm in court_norm or variant_compact in court_compact):
+            return 1.0
+        if variant in court_norm or variant.replace(" ", "") in court_compact:
+            return 1.0
+
+    # Multi-word Latin labels (e.g. "talegaon dhamdhere"): require all words in court.
+    latin_tokens = {
+        t
+        for t in _normalize_name(label or "").split()
+        if t and re.search(r"[a-z]", t, re.I)
+    }
+    if not latin_tokens:
+        return 0.0
+    court_tokens = set(court_norm.split())
+    return len(latin_tokens & court_tokens) / len(latin_tokens)
+
+
+def _court_location_tier_scores(
+    court_text: str,
+    *,
+    district_label: str = "",
+    taluka_label: str = "",
+    village_label: str = "",
+) -> tuple[float, float, float]:
+    """Return (village, taluka, district) court-name overlap scores in [0, 1]."""
+    return (
+        round(_location_token_overlap(court_text, village_label), 4),
+        round(_location_token_overlap(court_text, taluka_label), 4),
+        round(_location_token_overlap(court_text, district_label), 4),
+    )
+
+
 def _court_location_overlap_score(
     court_text: str,
     *,
@@ -552,39 +707,19 @@ def _court_location_overlap_score(
 ) -> float:
     """
     Court location relevance signal.
-    Prioritizes taluka/city-level overlap (e.g. Koregaon) over district, with
-    a small village-level tie-breaker if available.
+    Prioritizes village, then taluka, then district overlap with the court name.
     """
-    court_norm = _normalize_name(court_text or "")
-    if not court_norm:
+    village_score, taluka_score, district_score = _court_location_tier_scores(
+        court_text,
+        district_label=district_label,
+        taluka_label=taluka_label,
+        village_label=village_label,
+    )
+    if not any((village_score, taluka_score, district_score)):
         return 0.0
-    court_tokens = set(court_norm.split())
-    if not court_tokens:
-        return 0.0
-
-    def _expand_location_tokens(label: str) -> set[str]:
-        raw_base = (label or "").strip().lower()
-        base = _normalize_name(label or "")
-        tokens = set(base.split()) if base else set()
-        aliases = LOCATION_ALIASES.get(raw_base, ()) or LOCATION_ALIASES.get(base, ())
-        if aliases:
-            for alias in aliases:
-                alias_norm = _normalize_name(alias)
-                if alias_norm:
-                    tokens.update(alias_norm.split())
-        return tokens
-
-    def _token_overlap(label: str) -> float:
-        label_tokens = _expand_location_tokens(label)
-        if not label_tokens:
-            return 0.0
-        return len(label_tokens & court_tokens) / len(label_tokens)
-
-    district_score = _token_overlap(district_label)
-    taluka_score = _token_overlap(taluka_label)
-    village_score = _token_overlap(village_label)
-    # Taluka gets the largest location weight because users search locally.
-    score = taluka_score * 0.6 + district_score * 0.3 + village_score * 0.1
+    # Village is most specific; district-only matches (e.g. "Pune" in a Pune bench)
+    # should not outrank a taluka-local court (e.g. Shirur) for a Shirur parcel.
+    score = village_score * 0.50 + taluka_score * 0.35 + district_score * 0.15
     return round(min(score, 1.0), 4)
 
 
@@ -732,15 +867,15 @@ def rank_api_case_hits(
     for original in records:
         rec = _canonicalize_case_record(original)
         parties = _party_text_from_api_record(rec)
+        party_names = _extract_individual_party_names(rec)
 
-        # Score owners only when the full normalized name appears as an exact
-        # phrase in party text (no fuzzy / partial-token credit).
-        primary_score, matched_owner, reason = score_owner_variants_exact_phrase(parties, primary_variants)
+        # Score owners only when a full 7/12 name exactly matches one party entry.
+        primary_score, matched_owner, reason = score_owner_variants_exact_phrase(rec, primary_variants)
         secondary_score = 0.0
         sec_reason = "no_exact_match"
         if secondary_variants:
             secondary_score, sec_match, sec_reason = score_owner_variants_exact_phrase(
-                parties, secondary_variants
+                rec, secondary_variants
             )
             if secondary_score > primary_score:
                 matched_owner = matched_owner or sec_match
@@ -751,7 +886,7 @@ def rank_api_case_hits(
 
         owner_match_count = 0
         for owner in owner_variants:
-            if owner_name_exact_in_parties(parties, owner):
+            if any(_names_exact_equivalent(owner, party) for party in party_names):
                 owner_match_count += 1
         owner_total = len(owner_variants)
         all_owner_match = owner_total > 1 and owner_match_count == owner_total
@@ -773,6 +908,12 @@ def rank_api_case_hits(
             or ""
         )
         district_score = _district_court_overlap_score(str(court), district_label)
+        village_loc_score, taluka_loc_score, district_loc_score = _court_location_tier_scores(
+            str(court),
+            district_label=district_label,
+            taluka_label=taluka_label,
+            village_label=village_label,
+        )
         location_score = _court_location_overlap_score(
             str(court),
             district_label=district_label,
@@ -809,6 +950,10 @@ def rank_api_case_hits(
                 matched_variant=matched_owner,
                 primary_name_matched=primary_name_matched,
                 owner_side_purity=side_purity,
+                village_location_score=village_loc_score,
+                taluka_location_score=taluka_loc_score,
+                district_location_score=district_loc_score,
+                is_pending=pending,
                 match_explanation=(
                     f"{reason};primary_score={primary_score:.2f};secondary_score={secondary_score:.2f};"
                     f"owner_matches={owner_match_count}/{owner_total};"
@@ -816,6 +961,9 @@ def rank_api_case_hits(
                     f"owner_side_purity={side_purity:.2f};"
                     f"igr_party_overlap={party_score:.2f};"
                     f"district_court_overlap={district_score:.2f};pending={pending}"
+                    f";village_court_overlap={village_loc_score:.2f}"
+                    f";taluka_court_overlap={taluka_loc_score:.2f}"
+                    f";district_location_overlap={district_loc_score:.2f}"
                     f";court_location_overlap={location_score:.2f}"
                 ),
                 raw_json=json.dumps(rec, ensure_ascii=False),
@@ -825,11 +973,13 @@ def rank_api_case_hits(
         key=lambda h: (
             -h.owner_match_count,                                                # 1st: most owners matched (5→4→3→2→1)
             -h.owner_side_purity,                                                # 2nd: matched owners dominate their side
-                                                                                 #      (1.0 = individual/pure group, <1.0 = strangers mixed in)
             -(h.owner_match_count / h.owner_total) if h.owner_total else 0.0,   # 3rd: match density tiebreak
             not h.primary_name_matched,                                          # 4th: prefer 7/12 Bhulekh match
-            "pending=false" in (h.match_explanation or ""),                      # 5th: pending cases first
-            -h.name_match_score,                                                 # 6th: overall score
+            -h.village_location_score,                                           # 5th: village court match
+            -h.taluka_location_score,                                            # 6th: taluka court match
+            -h.district_location_score,                                          # 7th: district court match (weakest)
+            not h.is_pending,                                                    # 8th: pending cases first
+            -h.name_match_score,                                                 # 9th: overall score
             h.search_year or "9999",
         )
     )

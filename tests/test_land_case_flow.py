@@ -1,6 +1,9 @@
 """Unit tests for land-to-cases helper logic."""
 
 from api.land_case_flow import (
+    _court_location_overlap_score,
+    _court_location_tier_scores,
+    _names_exact_equivalent,
     _parse_land_record_text,
     build_name_variants,
     extract_survey_option_labels,
@@ -8,6 +11,7 @@ from api.land_case_flow import (
     owner_name_exact_in_parties,
     rank_case_hits,
     rank_api_case_hits,
+    record_matches_owner_names_exact,
     score_case_against_variants,
     dedupe_case_key,
 )
@@ -74,6 +78,93 @@ def test_owner_name_exact_in_parties_requires_full_phrase_order():
 def test_owner_name_exact_single_token_not_substring_of_longer_name():
     assert owner_name_exact_in_parties("A vs State", "A")
     assert not owner_name_exact_in_parties("Alice vs State", "A")
+
+
+def test_names_exact_equivalent_allows_spacing_variants():
+    assert _names_exact_equivalent("Mohini Mahesh Sondekar", "mohinimahesh sondekar")
+    assert not _names_exact_equivalent("Sandip Arun Narke", "lata arun narke")
+    assert not _names_exact_equivalent("Arun Bhagwan Narke", "arun prabhakar narke")
+
+
+def test_record_matches_owner_names_exact_requires_full_party_name():
+    owners = [
+        "ranjana dattatraya dharwadkar",
+        "lata arun narke",
+        "arun prabhakar narke",
+        "mohinimahesh sondekar",
+    ]
+    assert record_matches_owner_names_exact(
+        {
+            "petitioners": ["Arun Prabhakar Narke"],
+            "respondents": ["Mohini Mahesh Sondekar"],
+        },
+        owners,
+    )
+    assert not record_matches_owner_names_exact(
+        {"petitioners": ["Sandip Arun Narke"], "respondents": ["Saraswati Vidhyalay"]},
+        owners,
+    )
+    assert not record_matches_owner_names_exact(
+        {"petitioners": ["Lata Arun Walunjkar"], "respondents": ["Krushna Sakharam Narke"]},
+        owners,
+    )
+    assert not record_matches_owner_names_exact(
+        {"petitioners": ["Snehalata Vilas Gore"], "respondents": ["Arun Bhagwan Narke"]},
+        owners,
+    )
+
+
+def test_rank_api_case_hits_drops_partial_name_overlap_cases():
+    owners = [
+        "lata arun narke",
+        "arun prabhakar narke",
+        "mohinimahesh sondekar",
+    ]
+    records = [
+        {
+            "case_id": "GOOD",
+            "petitioners": ["Arun Prabhakar Narke"],
+            "respondents": ["Mohini Mahesh Sondekar"],
+            "case_type": "CS",
+            "case_status": "Pending",
+            "court": "CIVIL COURT SENIOR DIVISION GHODNADI SHIRUR",
+            "search_year": "2026",
+            "cnr": "MHPU390009782026",
+        },
+        {
+            "case_id": "PARTIAL",
+            "petitioners": ["Sandip Arun Narke"],
+            "respondents": ["Saraswati Vidhyalay, Narkewada, Kolhapur"],
+            "case_type": "CS",
+            "case_status": "Pending",
+            "court": "District Court Pune",
+            "search_year": "2025",
+            "cnr": "MHPU020064292025",
+        },
+        {
+            "case_id": "WRONG_ARUN",
+            "petitioners": ["Snehalata Vilas Gore"],
+            "respondents": ["Arun Bhagwan Narke"],
+            "case_type": "CS",
+            "case_status": "Pending",
+            "court": "District Court Pune",
+            "search_year": "2024",
+            "cnr": "MHPU020064292024",
+        },
+    ]
+    out = rank_api_case_hits(
+        records,
+        owner_name=owners[0],
+        owner_names=owners,
+        primary_owner_names=owners,
+        igr_party_names=[],
+        district_label="Pune",
+        taluka_label="Shirur",
+        village_label="Talegaon Dhamdhere",
+        min_score=0.0,
+    )
+    assert [hit.case_id for hit in out] == ["GOOD"]
+    assert out[0].matched_variant == "arun prabhakar narke"
 
 
 def test_rank_case_hits_orders_by_match_score_then_search_year():
@@ -235,6 +326,84 @@ def test_rank_api_case_hits_marathi_taluka_matches_english_court():
     assert len(out) == 1
     assert "court_location_overlap=" in (out[0].match_explanation or "")
     assert "court_location_overlap=0.00" not in (out[0].match_explanation or "")
+
+
+def test_rank_api_case_hits_prioritizes_shirur_taluka_over_pune_district_court():
+    """Talegaon Dhamdhere / Shirur / Pune — Shirur bench should beat Pune district court."""
+    parties = "Arun Prabhakar Narke v. Mohini Mahesh Sondekar"
+    records = [
+        {
+            "case_id": "PUNE_BENCH",
+            "case_type": "CS",
+            "case_status": "Disposed",
+            "petitioners": ["Arun Prabhakar Narke"],
+            "respondents": ["Mohini Mahesh Sondekar"],
+            "parties_text": parties,
+            "court": "CIVIL COURT PUNE MAHARASHTRA",
+            "search_year": "2021",
+            "cnr": "MHPU020081482021",
+        },
+        {
+            "case_id": "SHIRUR_BENCH",
+            "case_type": "CS",
+            "case_status": "Pending",
+            "petitioners": ["Arun Prabhakar Narke"],
+            "respondents": ["Mohini Mahesh Sondekar"],
+            "parties_text": parties,
+            "court": "CIVIL COURT SENIOR DIVISION GHODNADI SHIRUR",
+            "search_year": "2026",
+            "cnr": "MHPU390009782026",
+        },
+    ]
+    out = rank_api_case_hits(
+        records,
+        owner_name="Arun Prabhakar Narke",
+        owner_names=["Arun Prabhakar Narke", "Mohini Mahesh Sondekar"],
+        primary_owner_names=["Arun Prabhakar Narke", "Mohini Mahesh Sondekar"],
+        igr_party_names=[],
+        district_label="Pune",
+        taluka_label="Shirur",
+        village_label="Talegaon Dhamdhere",
+        min_score=0.0,
+    )
+    assert len(out) == 2
+    assert out[0].case_id == "SHIRUR_BENCH"
+    assert out[0].taluka_location_score == 1.0
+    assert out[1].case_id == "PUNE_BENCH"
+    assert out[1].district_location_score == 1.0
+    assert out[1].taluka_location_score == 0.0
+
+
+def test_court_location_overlap_prioritizes_village_then_taluka_then_district():
+    village, taluka, district = _court_location_tier_scores(
+        "CIVIL COURT SENIOR DIVISION GHODNADI SHIRUR",
+        district_label="Pune",
+        taluka_label="Shirur",
+        village_label="Talegaon Dhamdhere",
+    )
+    assert village == 0.0
+    assert taluka == 1.0
+    assert district == 0.0
+
+    pune_scores = _court_location_tier_scores(
+        "CIVIL COURT PUNE MAHARASHTRA",
+        district_label="Pune",
+        taluka_label="Shirur",
+        village_label="Talegaon Dhamdhere",
+    )
+    assert pune_scores == (0.0, 0.0, 1.0)
+
+    assert _court_location_overlap_score(
+        "CIVIL COURT SENIOR DIVISION GHODNADI SHIRUR",
+        district_label="Pune",
+        taluka_label="Shirur",
+        village_label="Talegaon Dhamdhere",
+    ) > _court_location_overlap_score(
+        "CIVIL COURT PUNE MAHARASHTRA",
+        district_label="Pune",
+        taluka_label="Shirur",
+        village_label="Talegaon Dhamdhere",
+    )
 
 
 def test_rank_api_case_hits_prioritizes_all_owner_matches_over_single():

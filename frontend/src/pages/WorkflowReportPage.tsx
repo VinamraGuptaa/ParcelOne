@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   apiGet,
   API_BASE,
@@ -8,6 +8,11 @@ import {
   type WorkflowArtifacts,
   type LitigationSignal,
 } from '../api/client';
+import {
+  cancelWorkflow,
+  parseActiveWorkflowId,
+  restartLandCaseWorkflow,
+} from '../lib/workflowActions';
 import ProgressBar from '../components/ui/ProgressBar';
 import StatusBadge from '../components/ui/StatusBadge';
 import IGRChain from '../components/IGRChain';
@@ -15,9 +20,25 @@ import IGRChain from '../components/IGRChain';
 const POLL_MS = 3000;
 const MAX_FAILURES = 10;
 
-function isTerminal(status: string): boolean {
+function isSuccess(status: string): boolean {
   const s = status.toLowerCase();
   return s === 'ranked_done' || s === 'done' || s === 'completed' || s === 'succeeded';
+}
+
+function isActive(status: string): boolean {
+  const s = status.toLowerCase();
+  return (
+    s === 'pending_input' ||
+    s === 'bhulekh_running' ||
+    s === 'name_variants_ready' ||
+    s === 'igr_running' ||
+    s === 'ecourts_running'
+  );
+}
+
+function isStopped(status: string): boolean {
+  const s = status.toLowerCase();
+  return s === 'failed' || s === 'cancelled';
 }
 
 function reportTitle(wf: WorkflowResponse): string {
@@ -31,12 +52,17 @@ function reportTitle(wf: WorkflowResponse): string {
 
 export default function WorkflowReportPage() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const [wf, setWf] = useState<WorkflowResponse | null>(null);
   const [results, setResults] = useState<WorkflowResults | null>(null);
   const [artifacts, setArtifacts] = useState<WorkflowArtifacts | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
   const [resultsError, setResultsError] = useState<string | null>(null);
   const [resultsLoading, setResultsLoading] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [activeWorkflowId, setActiveWorkflowId] = useState<string | null>(null);
   const failuresRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -70,12 +96,15 @@ export default function WorkflowReportPage() {
       failuresRef.current = 0;
       setWf(data);
 
-      if (isTerminal(data.status)) {
+      if (isSuccess(data.status)) {
         stopPolling();
         await loadFinalResults(workflowId);
       } else if (data.status === 'failed') {
         stopPolling();
         setPageError(data.error_message ?? 'Workflow failed.');
+      } else if (data.status === 'cancelled') {
+        stopPolling();
+        setPageError(null);
       }
     } catch {
       failuresRef.current += 1;
@@ -94,14 +123,20 @@ export default function WorkflowReportPage() {
     setPageError(null);
     setResultsError(null);
     setResultsLoading(false);
+    setActionError(null);
+    setActiveWorkflowId(null);
+    setCancelling(false);
+    setRestarting(false);
 
     apiGet<WorkflowResponse>(`/workflows/${id}`)
       .then(async (data) => {
         setWf(data);
-        if (isTerminal(data.status)) {
+        if (isSuccess(data.status)) {
           await loadFinalResults(id);
         } else if (data.status === 'failed') {
           setPageError(data.error_message ?? 'Workflow failed.');
+        } else if (!isActive(data.status)) {
+          /* ranked / stopped — no poll */
         } else {
           timerRef.current = setInterval(() => poll(id), POLL_MS);
         }
@@ -127,9 +162,56 @@ export default function WorkflowReportPage() {
 
   if (!wf) return null;
 
+  async function handleCancel() {
+    if (!wf || cancelling) return;
+    setActionError(null);
+    setActiveWorkflowId(null);
+    setCancelling(true);
+    try {
+      const updated = await cancelWorkflow(wf.workflow_id);
+      stopPolling();
+      setWf(updated);
+      setPageError(null);
+    } catch (e: unknown) {
+      setActionError((e as Error).message ?? 'Cancel failed.');
+    } finally {
+      setCancelling(false);
+    }
+  }
+
+  async function handleTryAgain() {
+    if (!wf || restarting) return;
+    setActionError(null);
+    setActiveWorkflowId(null);
+    setRestarting(true);
+    try {
+      const created = await restartLandCaseWorkflow({
+        district_label: wf.district_label,
+        taluka_label: wf.taluka_label,
+        village_label: wf.village_label,
+        survey_part1: wf.survey_part1,
+        survey_option_label: wf.survey_option_label,
+        owner_name: wf.owner_name,
+      });
+      window.dispatchEvent(new Event('plotwise:refresh-sidebar'));
+      navigate(`/report/workflow/${created.workflow_id}`);
+    } catch (err: unknown) {
+      const e = err as Error & { status?: number; detail?: unknown };
+      if (e.status === 409) {
+        setActionError('Another workflow is already running. Cancel it or wait for it to finish.');
+        setActiveWorkflowId(parseActiveWorkflowId(e.detail));
+      } else {
+        setActionError(e.message ?? 'Try again failed.');
+      }
+    } finally {
+      setRestarting(false);
+    }
+  }
+
   const title = reportTitle(wf);
-  const isRunning = !isTerminal(wf.status) && wf.status !== 'failed';
-  const isDone = isTerminal(wf.status);
+  const running = isActive(wf.status);
+  const done = isSuccess(wf.status);
+  const showTryAgain = done || isStopped(wf.status);
 
   return (
     <>
@@ -153,9 +235,63 @@ export default function WorkflowReportPage() {
         {wf.owner_name ? ` · ${wf.owner_name}` : ''}
       </p>
 
+      <div className="workflow-actions">
+        {running && (
+          <button
+            type="button"
+            className="btn btn--secondary"
+            disabled={cancelling || restarting}
+            onClick={handleCancel}
+          >
+            {cancelling ? (
+              <>
+                <span className="spinner" />
+                Cancelling…
+              </>
+            ) : (
+              'Cancel'
+            )}
+          </button>
+        )}
+        {showTryAgain && (
+          <button
+            type="button"
+            className="btn btn--primary"
+            disabled={cancelling || restarting}
+            onClick={handleTryAgain}
+          >
+            {restarting ? (
+              <>
+                <span className="spinner" />
+                Starting…
+              </>
+            ) : (
+              'Try again'
+            )}
+          </button>
+        )}
+      </div>
+
+      {actionError && (
+        <div className="error-banner">
+          {actionError}
+          {activeWorkflowId && (
+            <div className="mt-8">
+              <Link to={`/report/workflow/${activeWorkflowId}`} className="btn btn--secondary btn--sm">
+                View running report
+              </Link>
+            </div>
+          )}
+        </div>
+      )}
+
       {pageError && <div className="error-banner">{pageError}</div>}
 
-      {isRunning && (
+      {wf.status === 'cancelled' && (
+        <div className="info-banner">This workflow was cancelled. You can try again with the same search inputs.</div>
+      )}
+
+      {running && (
         <ProgressBar
           status={wf.status}
           message={wf.progress_message}
@@ -164,11 +300,11 @@ export default function WorkflowReportPage() {
         />
       )}
 
-      {isDone && <PollSummaryStrip wf={wf} />}
+      {done && <PollSummaryStrip wf={wf} />}
 
-      {isDone && resultsLoading && <ReportLoadingSkeleton />}
+      {done && resultsLoading && <ReportLoadingSkeleton />}
 
-      {isDone && resultsError && !resultsLoading && (
+      {done && resultsError && !resultsLoading && (
         <div className="error-banner" style={{ marginBottom: 16 }}>
           Failed to load report details: {resultsError}
           {' '}

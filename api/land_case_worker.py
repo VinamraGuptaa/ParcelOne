@@ -22,6 +22,7 @@ from api.land_case_flow import (
     extract_survey_option_labels,
     rank_api_case_hits,
     rank_case_hits,
+    record_matches_owner_names_exact,
     write_html_artifact,
 )
 from api.models import (
@@ -38,6 +39,10 @@ logger = logging.getLogger(__name__)
 STAGE_RETRY_ATTEMPTS = 3
 STAGE_RETRY_DELAY_SECONDS = 2.0
 CACHE_TTL_SECONDS = 15 * 60
+
+
+class WorkflowCancelled(Exception):
+    """Raised when a land-case workflow has been cancelled by the user."""
 
 
 def _now() -> datetime:
@@ -126,12 +131,16 @@ _AREA_UNIT_TOKENS = frozenset([
 # IGR uses many variations:
 #   "गट नंबर 1530 हिस्सा नंबर 3"
 #   "गट क्रमांक 1530 हिस्सा क्रमांक 3"
+#   "ग.नं 970"                       (abbreviated Gat number — common in IGR lists)
 #   "स.नं. 1530 हिस्सा 3"           (सर्वे नं prefix, no गट)
 #   "सर्वे नं. 1530 भाग 3"           (भाग = part, alternative to हिस्सा)
 _NUM_LABEL = r"(?:नंबर|नं\.?|क्रमांक|क्र\.?|क्रं\.?|no\.?|num\.?|number)?"
-# Gat/Survey prefix — also matches abbreviated सर्वे prefixes (स.नं., स नं, सर्वे नं)
+# Abbreviated Gat label used standalone (ग.नं / ग. नं. / ग.नं.)
+_GAT_ABBREV_LABEL = r"(?:ग\.?\s*नं\.?)"
+# Gat/Survey prefix — also matches abbreviated Gat (ग.नं) and सर्वे prefixes (स.नं.)
 _GAT_LABEL = (
     r"(?:(?:गट|gut|gat)"
+    r"|(?:ग\.?\s*नं\.?(?:\s+|\.))"        # ग.नं / ग. नं. / ग.नं.
     r"|(?:स\.?\s*नं\.?(?:\s+|\.))"        # स.नं. / स नं / स.नं
     r"|(?:सर्वे\s*(?:नं\.?|नंबर|क्र\.?|क्रमांक)?)"  # सर्वे नं / सर्वे नंबर
     r"|(?:survey\s*(?:no\.?|num\.?|number)?)"
@@ -186,7 +195,10 @@ def _context_slice(hay: str, start: int, end: int, before: int = 45, after: int 
 
 
 def _gat_label_before(window: str) -> bool:
-    return bool(re.search(_GAT_LABEL + r"\s*$", window, re.IGNORECASE | re.UNICODE))
+    if re.search(_GAT_LABEL + r"\s*$", window, re.IGNORECASE | re.UNICODE):
+        return True
+    # Glued form "ग.नं970" — abbrev immediately precedes digits with no trailing space.
+    return bool(re.search(_GAT_ABBREV_LABEL + r"\s*$", window, re.IGNORECASE | re.UNICODE))
 
 
 def _has_required_survey_label(hay: str, start: int) -> bool:
@@ -249,6 +261,17 @@ def _contains_exact_survey_token(text: str, survey_token: str) -> bool:
         )
         if _match_accepts(exact):
             return True
+
+    # ── 1b. Abbreviated Gat label + bare number: "ग.नं 970" / "ग.नं970" ─────
+    for tok in toks:
+        gat_abbrev_num = re.compile(
+            rf"{_GAT_ABBREV_LABEL}\s*\.?\s*{re.escape(tok)}(?![0-9a-z\u0900-\u097f])",
+            re.IGNORECASE | re.UNICODE,
+        )
+        for m in gat_abbrev_num.finditer(hay):
+            tok_start = m.end() - len(tok)
+            if _accept_igr_survey_match(hay, tok_start, m.end(), survey_token):
+                return True
 
     if "/" not in survey_token:
         return False
@@ -721,6 +744,15 @@ async def run_land_case_workflow(workflow_id: str) -> None:
             finished_at=_now(),
         )
 
+    async def _ensure_not_cancelled(stage: str = "") -> None:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(LandCaseWorkflow.status).where(LandCaseWorkflow.id == workflow_id)
+            )
+            status = result.scalar_one_or_none()
+        if status == "cancelled":
+            raise WorkflowCancelled(stage or "workflow")
+
     async def _run_with_retries(
         stage: str,
         operation: str,
@@ -790,6 +822,7 @@ async def run_land_case_workflow(workflow_id: str) -> None:
         )
 
     try:
+        await _ensure_not_cancelled("startup")
         logger.info("[workflow:%s] Stage bhulekh_running started.", workflow_id)
         try:
             await _run_with_retries(
@@ -808,6 +841,8 @@ async def run_land_case_workflow(workflow_id: str) -> None:
                     survey_option_label=wf.survey_option_label,
                 ),
             )
+        except WorkflowCancelled:
+            raise
         except Exception as exc:
             await _fail_workflow("bhulekh_running", exc)
             return
@@ -817,6 +852,8 @@ async def run_land_case_workflow(workflow_id: str) -> None:
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         try:
             pdf_path = await bhulekh.save_verification_pdf(artifacts_dir / f"{workflow_id}_land_record.pdf")
+        except WorkflowCancelled:
+            raise
         except Exception as exc:
             await _fail_workflow("pdf_export", exc)
             return
@@ -901,6 +938,7 @@ async def run_land_case_workflow(workflow_id: str) -> None:
             s for s in survey_options if s and s.strip() and s.strip() != (wf.survey_option_label or "").strip()
         ]
         target_survey_option = (wf.survey_option_label or "").strip()
+        await _ensure_not_cancelled("before_igr")
         logger.info(
             "[workflow:%s] Stage igr_running started (target_survey=%r sibling_surveys=%s).",
             workflow_id,
@@ -945,6 +983,7 @@ async def run_land_case_workflow(workflow_id: str) -> None:
             nonlocal completed_years
             local_matches: list[dict] = []
             for year in year_slice:
+                await _ensure_not_cancelled(f"igr_running year={year}")
                 try:
                     recs = await _run_with_retries(
                         stage="igr_running",
@@ -1046,6 +1085,8 @@ async def run_land_case_workflow(workflow_id: str) -> None:
                     _run_igr_year_loop(igr2, igr_years[mid:], "slice2"),
                 )
                 slice_results = list(results)
+        except WorkflowCancelled:
+            raise
         except Exception as exc:
             await _fail_workflow("igr_running", exc)
             return
@@ -1082,6 +1123,7 @@ async def run_land_case_workflow(workflow_id: str) -> None:
         )
 
         logger.info("[workflow:%s] Stage ecourts_running started.", workflow_id)
+        await _ensure_not_cancelled("before_ecourts")
         owner_name_input = (wf.owner_name_input or "").strip()
         owner_names_for_api = _split_owner_names(owner_name_input)
         owner_source = "input"
@@ -1490,6 +1532,8 @@ async def run_land_case_workflow(workflow_id: str) -> None:
                     api_metrics.get("total_requests"),
                     api_metrics.get("estimated_cost_inr"),
                 )
+            except WorkflowCancelled:
+                raise
             except Exception as exc:
                 await _fail_workflow("ecourts_running", exc)
                 await api_client.close()
@@ -1525,11 +1569,30 @@ async def run_land_case_workflow(workflow_id: str) -> None:
                             continue
                         dedupe.add(key)
                         collected.append(rec)
+            except WorkflowCancelled:
+                raise
             except Exception as exc:
                 await _fail_workflow("ecourts_running", exc)
                 return
 
         # API-first ranking: exact owner query + IGR party overlap.
+        owner_match_pool = bhulekh_owner_names or owner_names_for_api
+        before_owner_filter = len(collected)
+        collected = [
+            row
+            for row in collected
+            if record_matches_owner_names_exact(
+                _canonicalize_ecourts_case_record(row),
+                owner_match_pool,
+            )
+        ]
+        logger.info(
+            "[workflow:%s] eCourts owner exact-match filter: kept=%s dropped=%s owners=%s",
+            workflow_id,
+            len(collected),
+            before_owner_filter - len(collected),
+            owner_match_pool,
+        )
         ranked = rank_api_case_hits(
             collected,
             owner_name=owner_name,
@@ -1595,6 +1658,8 @@ async def run_land_case_workflow(workflow_id: str) -> None:
             await db.commit()
         logger.info("[workflow:%s] Workflow completed successfully.", workflow_id)
 
+    except WorkflowCancelled:
+        logger.info("[workflow:%s] Workflow cancelled by user.", workflow_id)
     except Exception as exc:
         await _fail_workflow("workflow_unhandled", exc)
     finally:
