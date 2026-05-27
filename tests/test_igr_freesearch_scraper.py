@@ -120,6 +120,14 @@ def test_page_html_has_registration_grid():
     assert not IGRFreeSearchScraper._page_html_has_registration_grid("<html><form></form></html>")
 
 
+def test_save_raw_search_html_skipped_by_default(monkeypatch):
+    monkeypatch.delenv("IGR_SAVE_RAW_HTML", raising=False)
+    out = IGRFreeSearchScraper._save_raw_search_html(
+        "<html></html>", survey_number="70", year="2020", attempt=1
+    )
+    assert out is None
+
+
 def test_classify_igr_search_html_detects_grid_zero_phase1_and_rejection():
     grid_html = """
     <html><body>

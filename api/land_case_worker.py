@@ -966,7 +966,7 @@ async def run_land_case_workflow(workflow_id: str) -> None:
             )
             await db.commit()
 
-        parallel_contexts = max(1, min(2, int(os.getenv("IGR_PARALLEL_CONTEXTS", "2"))))
+        parallel_contexts = max(1, min(2, int(os.getenv("IGR_PARALLEL_CONTEXTS", "1"))))
         # Seconds to delay slice2's browser launch relative to slice1.  Staggering
         # avoids hammering the IGR server with two simultaneous page.goto calls,
         # which increases the chance of both timing out.
