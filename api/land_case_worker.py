@@ -945,6 +945,18 @@ async def run_land_case_workflow(workflow_id: str) -> None:
             target_survey_option,
             sibling_surveys,
         )
+        from igr_freesearch_scraper import (
+            IGR_PENDING_STALL_SECONDS,
+            IGR_RESULTS_WAIT_SECONDS,
+        )
+
+        logger.info(
+            "[workflow:%s] IGR timing config: results_wait=%.0fs pending_stall=%.0fs parallel_contexts=%s",
+            workflow_id,
+            IGR_RESULTS_WAIT_SECONDS,
+            IGR_PENDING_STALL_SECONDS,
+            os.getenv("IGR_PARALLEL_CONTEXTS", "1"),
+        )
         # IGR portal search uses the plain base number (e.g. "1530"), never "1530/3" with a
         # slash — the portal accepts only the Gat base.  It returns all documents whose
         # property descriptions mention that base survey in any format.  We then apply
