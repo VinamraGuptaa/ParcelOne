@@ -991,6 +991,12 @@ async def run_land_case_workflow(workflow_id: str) -> None:
                         target_survey_option,
                         slice_id,
                     )
+                elif not recs:
+                    logger.info(
+                        "[workflow:%s] IGR year=%s returned no portal rows (empty registration year).",
+                        workflow_id,
+                        year,
+                    )
                 local_matches.extend(matched)
 
                 async with progress_lock:

@@ -37,6 +37,11 @@ IGR_GOTO_TIMEOUT_MS = int(os.getenv("IGR_GOTO_TIMEOUT_MS", "90000"))
 # How many times to retry a timed-out navigation *within* setup_driver before
 # propagating the error to the outer _run_with_retries loop.
 IGR_GOTO_RETRIES = int(os.getenv("IGR_GOTO_RETRIES", "3"))
+# How long to poll for RegistrationGrid / zero-results text after Search submit.
+# Prod headless sessions often need well over 45s; do not key off UpdateProgress1 alone.
+IGR_RESULTS_WAIT_SECONDS = float(os.getenv("IGR_RESULTS_WAIT_SECONDS", "120"))
+
+_IGR_ZERO_RESULTS_PHRASE = "आढळून आलेली नाही"
 
 SEL_YEAR = "#ddlFromYear1"
 SEL_DISTRICT = "#ddlDistrict1"
@@ -635,6 +640,127 @@ class IGRFreeSearchScraper:
             except Exception:
                 pass
             await asyncio.sleep(0.25)
+
+    @staticmethod
+    def _captcha_status_indicates_rejection(status_text: str) -> bool:
+        status = (status_text or "").strip().lower()
+        if not status:
+            return False
+        reject_markers = (
+            "incorrect captcha",
+            "invalid captcha",
+            "wrong captcha",
+            "enter correct captcha",
+            "please enter correct captcha",
+        )
+        if any(marker in status for marker in reject_markers):
+            return True
+        # Phase-1 acceptance copy — not a rejection.
+        if "entered correct captcha" in status:
+            return False
+        if "captcha" in status and any(word in status for word in ("invalid", "incorrect", "wrong", "mismatch")):
+            return True
+        return False
+
+    @staticmethod
+    def _classify_igr_search_html(
+        html: str,
+        *,
+        previous_captcha_fp: str = "",
+        current_captcha_fp: str = "",
+        status_text: str = "",
+    ) -> str:
+        """
+        Classify post-submit page state.
+
+        Returns one of: grid, zero, phase1, wrong_captcha, pending.
+        """
+        if _IGR_ZERO_RESULTS_PHRASE in html:
+            return "zero"
+        grid_rows = IGRFreeSearchScraper._parse_registration_grid(html)
+        _, pager_pages = IGRFreeSearchScraper._registration_grid_pager_pages(html)
+        if grid_rows or pager_pages:
+            return "grid"
+        if IGRFreeSearchScraper._captcha_status_indicates_rejection(status_text):
+            return "wrong_captcha"
+        if (
+            previous_captcha_fp
+            and current_captcha_fp
+            and previous_captcha_fp != current_captcha_fp
+        ):
+            return "phase1"
+        return "pending"
+
+    async def _read_captcha_status_text(self) -> str:
+        assert self.page is not None
+        try:
+            return (
+                await self.page.locator("#lblimg_new").first.inner_text(timeout=1000)
+            ).strip()
+        except Exception:
+            return ""
+
+    async def _clear_captcha_field(self) -> None:
+        assert self.page is not None
+        try:
+            await self.page.fill(TXT_CAPTCHA, "")
+        except Exception:
+            pass
+
+    async def _wait_for_igr_search_outcome(
+        self,
+        captcha_fp_before: str,
+        *,
+        timeout_s: float | None = None,
+    ) -> tuple[str, str]:
+        """
+        Poll until the portal shows results, zero-results text, captcha rotation, or timeout.
+
+        Unlike spinner-only waits, this does not treat a missing UpdateProgress1 element
+        as “search complete”.
+        """
+        assert self.page is not None
+        wait_s = timeout_s if timeout_s is not None else IGR_RESULTS_WAIT_SECONDS
+        deadline = asyncio.get_event_loop().time() + wait_s
+        elapsed_s = 0
+        last_html = ""
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(1.0)
+            elapsed_s += 1
+            await self._wait_for_postback_settle(timeout_s=3.0)
+            cur_fp = await self._get_captcha_src_fingerprint()
+            status_text = await self._read_captcha_status_text()
+            last_html = await self.page.content()
+            outcome = self._classify_igr_search_html(
+                last_html,
+                previous_captcha_fp=captcha_fp_before,
+                current_captcha_fp=cur_fp,
+                status_text=status_text,
+            )
+            if outcome != "pending":
+                logger.info(
+                    "IGR search outcome=%s after %ds (waited up to %.0fs).",
+                    outcome,
+                    elapsed_s,
+                    wait_s,
+                )
+                return outcome, last_html
+            if elapsed_s in (15, 30, 60, 90) or elapsed_s % 30 == 0:
+                logger.info(
+                    "IGR still waiting for RegistrationGrid or zero-results text… %ds elapsed.",
+                    elapsed_s,
+                )
+        return "timeout", last_html
+
+    async def _prepare_captcha_retry(self, previous_fp: str) -> None:
+        """Clear captcha input and force a fresh image before the next submit."""
+        await self._clear_captcha_field()
+        refreshed = await self._refresh_captcha_until_changed(previous_fp or "", timeout_s=10.0)
+        if not refreshed:
+            logger.warning(
+                "IGR captcha image did not rotate after refresh (fp=%r).",
+                (previous_fp or "")[:80],
+            )
 
     async def _refresh_captcha_until_changed(self, previous_fp: str, timeout_s: float = 8.0) -> bool:
         """
@@ -1402,129 +1528,71 @@ class IGRFreeSearchScraper:
                 await self.page.evaluate("document.querySelector('form')?.submit()")
                 logger.info("IGR submit %s: fallback form submit().", total_submit)
 
-            # ── Phase-1: quick settle (portal just validates captcha + shows status) ──
-            await self._wait_for_postback_settle(timeout_s=25.0)
-            await asyncio.sleep(0.5)
+            await self._wait_for_postback_settle(timeout_s=30.0)
 
-            try:
-                status_text = (
-                    await self.page.locator("#lblimg_new").first.inner_text(timeout=1000)
-                ).strip()
-            except Exception:
-                status_text = ""
+            outcome, html = await self._wait_for_igr_search_outcome(fp_before)
 
-            phase1_captcha_rotated = False
-            if status_text and "entered correct captcha" in status_text.lower():
-                for _ in range(10):
-                    cur_fp = await self._get_captcha_src_fingerprint()
-                    if cur_fp and fp_before and cur_fp != fp_before:
-                        phase1_captcha_rotated = True
-                        break
-                    await asyncio.sleep(0.5)
-            if phase1_captcha_rotated:
+            if outcome == "phase1":
                 logger.info(
-                    "IGR submit %s: Phase-1 accepted — waiting for new captcha.",
+                    "IGR submit %s: captcha rotated after submit (Phase-1) — solving new captcha.",
                     total_submit,
                 )
+                continue
+
+            if outcome == "wrong_captcha":
                 logger.info(
-                    "IGR submit %s: new captcha ready — proceeding to Phase-2.",
+                    "IGR submit %s: portal rejected captcha — refreshing image.",
                     total_submit,
                 )
-                continue  # solve the new captcha on the next loop iteration (Phase-2)
+                await self._prepare_captcha_retry(fp_before)
+                continue
+
+            if outcome == "timeout":
+                phase2_attempt += 1
+                self._save_raw_search_html(
+                    html,
+                    survey_number=survey_number,
+                    year=year,
+                    attempt=phase2_attempt,
+                )
+                logger.warning(
+                    "IGR phase-2 attempt %s/%s: RegistrationGrid not ready within %.0fs; retrying.",
+                    phase2_attempt,
+                    MAX_CAPTCHA_RETRIES,
+                    IGR_RESULTS_WAIT_SECONDS,
+                )
+                await self._prepare_captcha_retry(fp_before)
+                continue
+
+            if outcome == "zero":
+                phase2_attempt += 1
+                self._save_raw_search_html(
+                    html,
+                    survey_number=survey_number,
+                    year=year,
+                    attempt=phase2_attempt,
+                )
+                logger.info(
+                    "IGR phase-2 attempt %s/%s: portal confirmed zero results for year=%r.",
+                    phase2_attempt,
+                    MAX_CAPTCHA_RETRIES,
+                    year,
+                )
+                await self._click_cancel_for_next_year()
+                return []
+
+            if outcome != "grid":
+                phase2_attempt += 1
+                logger.warning(
+                    "IGR phase-2 attempt %s/%s: unexpected outcome=%r; retrying.",
+                    phase2_attempt,
+                    MAX_CAPTCHA_RETRIES,
+                    outcome,
+                )
+                await self._prepare_captcha_retry(fp_before)
+                continue
 
             phase2_attempt += 1
-            post_html = await self.page.content()
-            has_grid = bool(
-                self._parse_registration_grid(post_html)
-                or self._registration_grid_pager_pages(post_html)[1]
-            )
-
-            if has_grid:
-                html = post_html
-                logger.info(
-                    "IGR phase-2 attempt %s/%s — results grid already visible.",
-                    phase2_attempt,
-                    MAX_CAPTCHA_RETRIES,
-                )
-            else:
-                logger.info(
-                    "IGR phase-2 attempt %s/%s — waiting for 'Please Wait' spinner.",
-                    phase2_attempt,
-                    MAX_CAPTCHA_RETRIES,
-                )
-                for _ in range(20):
-                    await asyncio.sleep(0.5)
-                    try:
-                        spinner_up = await self.page.evaluate(
-                            """() => {
-                                const el = document.getElementById('UpdateProgress1');
-                                if (!el) return false;
-                                const cs = window.getComputedStyle(el);
-                                return cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0';
-                            }"""
-                        )
-                    except Exception:
-                        spinner_up = False
-                    if spinner_up:
-                        logger.info(
-                            "IGR phase-2 attempt %s/%s: 'Please Wait' spinner appeared — server processing.",
-                            phase2_attempt,
-                            MAX_CAPTCHA_RETRIES,
-                        )
-                        break
-
-                deadline = asyncio.get_event_loop().time() + 120.0
-                elapsed_s = 0
-                while asyncio.get_event_loop().time() < deadline:
-                    await asyncio.sleep(1.0)
-                    elapsed_s += 1
-                    try:
-                        spinner_done = await self.page.evaluate(
-                            """() => {
-                                const el = document.getElementById('UpdateProgress1');
-                                if (!el) return true;
-                                const cs = window.getComputedStyle(el);
-                                return cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0';
-                            }"""
-                        )
-                    except Exception:
-                        spinner_done = True
-                    if spinner_done:
-                        logger.info(
-                            "IGR phase-2 attempt %s/%s: spinner gone after %ds — reading results.",
-                            phase2_attempt,
-                            MAX_CAPTCHA_RETRIES,
-                            elapsed_s,
-                        )
-                        break
-                    if elapsed_s % 15 == 0:
-                        logger.info(
-                            "IGR phase-2 attempt %s/%s: still waiting for spinner… %ds elapsed.",
-                            phase2_attempt,
-                            MAX_CAPTCHA_RETRIES,
-                            elapsed_s,
-                        )
-
-                html = await self.page.content()
-                results_deadline = asyncio.get_event_loop().time() + 45.0
-                while asyncio.get_event_loop().time() < results_deadline:
-                    if "आढळून आलेली नाही" in html:
-                        break
-                    grid_rows = self._parse_registration_grid(html)
-                    _, pager_pages = self._registration_grid_pager_pages(html)
-                    if grid_rows or pager_pages:
-                        break
-                    await asyncio.sleep(1.0)
-                    html = await self.page.content()
-                else:
-                    logger.info(
-                        "IGR phase-2 attempt %s/%s: results grid not ready after spinner; retrying.",
-                        phase2_attempt,
-                        MAX_CAPTCHA_RETRIES,
-                    )
-                    await self._refresh_captcha_until_changed(fp_before or "")
-                    continue
-
             self._save_raw_search_html(
                 html,
                 survey_number=survey_number,
@@ -1532,7 +1600,7 @@ class IGRFreeSearchScraper:
                 attempt=phase2_attempt,
             )
             # Portal shows this Marathi phrase when a year genuinely has no records.
-            if "आढळून आलेली नाही" in html:
+            if _IGR_ZERO_RESULTS_PHRASE in html:
                 logger.info(
                     "IGR phase-2 attempt %s/%s: portal confirmed zero results for year=%r.",
                     phase2_attempt,
@@ -1579,6 +1647,14 @@ class IGRFreeSearchScraper:
                 phase2_attempt,
                 MAX_CAPTCHA_RETRIES,
             )
-        logger.info("IGR search exhausted captcha attempts: survey=%r year=%r", survey_number, year)
+            await self._prepare_captcha_retry(fp_before)
+        logger.warning(
+            "IGR search exhausted captcha attempts: survey=%r year=%r",
+            survey_number,
+            year,
+        )
         await self._click_cancel_for_next_year()
-        return []
+        raise RuntimeError(
+            f"IGR search failed: RegistrationGrid not found for survey={survey_number!r} "
+            f"year={year!r} after {MAX_CAPTCHA_RETRIES} phase-2 attempts"
+        )

@@ -109,6 +109,51 @@ def test_save_raw_search_html_skipped_by_default(monkeypatch):
     assert out is None
 
 
+def test_classify_igr_search_html_detects_grid_zero_phase1_and_rejection():
+    grid_html = """
+    <html><body>
+      <table id="RegistrationGrid">
+        <tr><th>DocNo</th><th>Seller</th></tr>
+        <tr><td>100</td><td>Alice</td></tr>
+      </table>
+    </body></html>
+    """
+    assert IGRFreeSearchScraper._classify_igr_search_html(grid_html) == "grid"
+    assert (
+        IGRFreeSearchScraper._classify_igr_search_html(
+            "<html>आढळून आलेली नाही</html>"
+        )
+        == "zero"
+    )
+    assert (
+        IGRFreeSearchScraper._classify_igr_search_html(
+            "<html><form></form></html>",
+            previous_captcha_fp="a",
+            current_captcha_fp="b",
+        )
+        == "phase1"
+    )
+    assert (
+        IGRFreeSearchScraper._classify_igr_search_html(
+            "<html></html>",
+            status_text="Incorrect captcha entered",
+        )
+        == "wrong_captcha"
+    )
+    assert (
+        IGRFreeSearchScraper._classify_igr_search_html(
+            "<html></html>",
+            status_text="You have entered correct captcha",
+        )
+        == "pending"
+    )
+
+
+def test_captcha_status_indicates_rejection():
+    assert IGRFreeSearchScraper._captcha_status_indicates_rejection("Incorrect captcha") is True
+    assert IGRFreeSearchScraper._captcha_status_indicates_rejection("You have entered correct captcha") is False
+
+
 def test_registration_grid_pager_pages_from_saved_html():
     from pathlib import Path
 
