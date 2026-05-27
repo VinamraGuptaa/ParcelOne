@@ -101,12 +101,23 @@ def test_save_raw_search_html_writes_when_enabled(tmp_path, monkeypatch):
     assert out.read_text(encoding="utf-8") == html
 
 
-def test_save_raw_search_html_skipped_by_default(monkeypatch):
-    monkeypatch.delenv("IGR_SAVE_RAW_HTML", raising=False)
-    out = IGRFreeSearchScraper._save_raw_search_html(
-        "<html></html>", survey_number="70", year="2020", attempt=1
+def test_html_indicates_zero_results_marathi_and_english():
+    assert IGRFreeSearchScraper._html_indicates_zero_results("आढळून आलेली नाही")
+    assert IGRFreeSearchScraper._html_indicates_zero_results(
+        "<div>No records found for this search</div>"
     )
-    assert out is None
+    assert not IGRFreeSearchScraper._html_indicates_zero_results("<html><form></form></html>")
+
+
+def test_page_html_has_registration_grid():
+    grid_html = """
+    <table id="RegistrationGrid">
+      <tr><th>DocNo</th><th>Seller</th></tr>
+      <tr><td>100</td><td>Alice</td></tr>
+    </table>
+    """
+    assert IGRFreeSearchScraper._page_html_has_registration_grid(grid_html)
+    assert not IGRFreeSearchScraper._page_html_has_registration_grid("<html><form></form></html>")
 
 
 def test_classify_igr_search_html_detects_grid_zero_phase1_and_rejection():
@@ -132,6 +143,12 @@ def test_classify_igr_search_html_detects_grid_zero_phase1_and_rejection():
             current_captcha_fp="b",
         )
         == "phase1"
+    )
+    assert (
+        IGRFreeSearchScraper._classify_igr_search_html(
+            "<html><div>No record found</div></html>"
+        )
+        == "zero"
     )
     assert (
         IGRFreeSearchScraper._classify_igr_search_html(

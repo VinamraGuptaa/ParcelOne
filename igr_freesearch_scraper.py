@@ -40,8 +40,20 @@ IGR_GOTO_RETRIES = int(os.getenv("IGR_GOTO_RETRIES", "3"))
 # How long to poll for RegistrationGrid / zero-results text after Search submit.
 # Prod headless sessions often need well over 45s; do not key off UpdateProgress1 alone.
 IGR_RESULTS_WAIT_SECONDS = float(os.getenv("IGR_RESULTS_WAIT_SECONDS", "120"))
+# After this many consecutive empty OCR reads, reload the portal and refill the form.
+IGR_EMPTY_OCR_RECOVERY_THRESHOLD = int(os.getenv("IGR_EMPTY_OCR_RECOVERY_THRESHOLD", "3"))
+# RegistrationGrid timeouts before treating the year as empty and moving on.
+IGR_YEAR_TIMEOUT_ATTEMPTS = int(os.getenv("IGR_YEAR_TIMEOUT_ATTEMPTS", "2"))
 
 _IGR_ZERO_RESULTS_PHRASE = "आढळून आलेली नाही"
+_IGR_ZERO_RESULT_EN_MARKERS = (
+    "record not found",
+    "no record found",
+    "no records found",
+    "no data found",
+    "details not found",
+    "data not found",
+)
 
 SEL_YEAR = "#ddlFromYear1"
 SEL_DISTRICT = "#ddlDistrict1"
@@ -663,6 +675,13 @@ class IGRFreeSearchScraper:
         return False
 
     @staticmethod
+    def _html_indicates_zero_results(html: str) -> bool:
+        if _IGR_ZERO_RESULTS_PHRASE in (html or ""):
+            return True
+        lower = (html or "").lower()
+        return any(marker in lower for marker in _IGR_ZERO_RESULT_EN_MARKERS)
+
+    @staticmethod
     def _classify_igr_search_html(
         html: str,
         *,
@@ -675,7 +694,7 @@ class IGRFreeSearchScraper:
 
         Returns one of: grid, zero, phase1, wrong_captcha, pending.
         """
-        if _IGR_ZERO_RESULTS_PHRASE in html:
+        if IGRFreeSearchScraper._html_indicates_zero_results(html):
             return "zero"
         grid_rows = IGRFreeSearchScraper._parse_registration_grid(html)
         _, pager_pages = IGRFreeSearchScraper._registration_grid_pager_pages(html)
@@ -752,14 +771,163 @@ class IGRFreeSearchScraper:
                 )
         return "timeout", last_html
 
-    async def _prepare_captcha_retry(self, previous_fp: str) -> None:
+    @staticmethod
+    def _page_html_has_registration_grid(html: str) -> bool:
+        rows = IGRFreeSearchScraper._parse_registration_grid(html)
+        _, pager_pages = IGRFreeSearchScraper._registration_grid_pager_pages(html)
+        return bool(rows or pager_pages)
+
+    async def _wait_for_captcha_image_ready(self, timeout_s: float = 15.0) -> bool:
+        """Wait until the captcha image is visible with non-trivial dimensions."""
+        assert self.page is not None
+        deadline = asyncio.get_event_loop().time() + timeout_s
+        while asyncio.get_event_loop().time() < deadline:
+            fp = await self._get_captcha_src_fingerprint()
+            if not fp:
+                await asyncio.sleep(0.35)
+                continue
+            try:
+                img = self.page.locator(IMG_CAPTCHA).first
+                if await img.count() == 0:
+                    await asyncio.sleep(0.35)
+                    continue
+                await img.wait_for(state="visible", timeout=1500)
+                box = await img.bounding_box()
+                if box and box.get("width", 0) > 10 and box.get("height", 0) > 10:
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.35)
+        return False
+
+    async def _search_form_looks_ready(self) -> bool:
+        """Best-effort check that the Rest-of-MH search form is usable."""
+        assert self.page is not None
+        try:
+            year_val = (await self.page.input_value(SEL_YEAR)).strip()
+            survey_val = (await self.page.input_value(TXT_SURVEY)).strip()
+            if not year_val or not survey_val:
+                return False
+        except Exception:
+            return False
+        return await self._wait_for_captcha_image_ready(timeout_s=4.0)
+
+    async def _recover_search_page_after_stall(
+        self,
+        *,
+        district_label: str,
+        taluka_label: str,
+        village_label: str,
+        survey_number: str,
+        year: str,
+        reason: str,
+        previous_captcha_fp: str = "",
+    ) -> None:
+        """
+        Leave a hung post-search state: Cancel → portal reload if needed → refill form.
+        """
+        assert self.page is not None
+        logger.warning("IGR recovering search page (%s).", reason)
+
+        await self._click_cancel_for_next_year()
+        await self._wait_for_postback_settle(timeout_s=15.0)
+        await asyncio.sleep(0.5)
+
+        html = await self.page.content()
+        needs_reload = (
+            self._page_html_has_registration_grid(html)
+            or not await self._search_form_looks_ready()
+        )
+        if needs_reload:
+            logger.info(
+                "IGR recovery: cancel did not restore search form (grid=%s); reloading portal.",
+                self._page_html_has_registration_grid(html),
+            )
+            await self._navigate_to_portal()
+            await asyncio.sleep(0.8)
+            await self._close_startup_popup()
+            await self._switch_to_rest_of_maharashtra_tab()
+
+        await self._fill_search_form(
+            district_label=district_label,
+            taluka_label=taluka_label,
+            village_label=village_label,
+            survey_number=survey_number,
+            year=year,
+        )
+        await self._clear_captcha_field()
+
+        refreshed = await self._refresh_captcha_until_changed(
+            previous_captcha_fp or "",
+            timeout_s=10.0,
+        )
+        if not refreshed:
+            logger.info("IGR recovery: captcha still stale after refill — hard reload.")
+            await self._navigate_to_portal()
+            await asyncio.sleep(0.8)
+            await self._close_startup_popup()
+            await self._switch_to_rest_of_maharashtra_tab()
+            await self._fill_search_form(
+                district_label=district_label,
+                taluka_label=taluka_label,
+                village_label=village_label,
+                survey_number=survey_number,
+                year=year,
+            )
+            await self._clear_captcha_field()
+            await self._refresh_captcha_until_changed("", timeout_s=10.0)
+
+        ready = await self._wait_for_captcha_image_ready(timeout_s=15.0)
+        logger.info(
+            "IGR search page recovery complete (captcha_ready=%s fp=%r).",
+            ready,
+            (await self._get_captcha_src_fingerprint())[:80],
+        )
+
+    async def _prepare_captcha_retry(
+        self,
+        previous_fp: str,
+        *,
+        district_label: str = "",
+        taluka_label: str = "",
+        village_label: str = "",
+        survey_number: str = "",
+        year: str = "",
+        force_full_recovery: bool = False,
+        recovery_reason: str = "captcha retry",
+    ) -> None:
         """Clear captcha input and force a fresh image before the next submit."""
+        form_kwargs = {
+            "district_label": district_label,
+            "taluka_label": taluka_label,
+            "village_label": village_label,
+            "survey_number": survey_number,
+            "year": year,
+        }
+        has_form = all(form_kwargs.values())
+
+        if force_full_recovery and has_form:
+            await self._recover_search_page_after_stall(
+                **form_kwargs,
+                reason=recovery_reason,
+                previous_captcha_fp=previous_fp,
+            )
+            return
+
         await self._clear_captcha_field()
         refreshed = await self._refresh_captcha_until_changed(previous_fp or "", timeout_s=10.0)
-        if not refreshed:
-            logger.warning(
-                "IGR captcha image did not rotate after refresh (fp=%r).",
-                (previous_fp or "")[:80],
+        if refreshed:
+            return
+
+        logger.warning(
+            "IGR captcha image did not rotate after refresh (fp=%r).",
+            (previous_fp or "")[:80],
+        )
+        if has_form:
+            await self._recover_search_page_after_stall(
+                **form_kwargs,
+                reason=f"{recovery_reason} (captcha refresh failed)",
+                previous_captcha_fp=previous_fp,
             )
 
     async def _refresh_captcha_until_changed(self, previous_fp: str, timeout_s: float = 8.0) -> bool:
@@ -798,6 +966,12 @@ class IGRFreeSearchScraper:
             except Exception:
                 continue
         logger.info("IGR year reset: cancel button not found; continuing without explicit cancel.")
+
+    async def _skip_year_as_empty(self, year: str, reason: str) -> list[dict]:
+        """Cancel the search form and advance to the next registration year."""
+        logger.info("IGR year=%r skipped as empty (%s).", year, reason)
+        await self._click_cancel_for_next_year()
+        return []
 
     async def _fill_captcha_field(self, captcha_text: str) -> bool:
         """
@@ -1468,8 +1642,17 @@ class IGRFreeSearchScraper:
         )
 
         phase2_attempt = 0
+        timeout_attempts = 0
         total_submit = 0
+        consecutive_empty_ocr = 0
         max_submits = max(MAX_CAPTCHA_RETRIES * 3, 10)
+        form_retry_kwargs = {
+            "district_label": district_label,
+            "taluka_label": taluka_label,
+            "village_label": village_label,
+            "survey_number": survey_number,
+            "year": year,
+        }
 
         while phase2_attempt < MAX_CAPTCHA_RETRIES and total_submit < max_submits:
             total_submit += 1
@@ -1498,8 +1681,21 @@ class IGRFreeSearchScraper:
             fp_before = await self._get_captcha_src_fingerprint()
             solved = await self._solve_captcha()
             if not solved:
-                logger.info("IGR submit %s: empty OCR text.", total_submit)
+                consecutive_empty_ocr += 1
+                logger.info(
+                    "IGR submit %s: empty OCR text (consecutive=%s).",
+                    total_submit,
+                    consecutive_empty_ocr,
+                )
+                if consecutive_empty_ocr >= IGR_EMPTY_OCR_RECOVERY_THRESHOLD:
+                    consecutive_empty_ocr = 0
+                    await self._recover_search_page_after_stall(
+                        **form_retry_kwargs,
+                        reason=f"{IGR_EMPTY_OCR_RECOVERY_THRESHOLD} consecutive empty OCR reads",
+                        previous_captcha_fp=fp_before,
+                    )
                 continue
+            consecutive_empty_ocr = 0
             filled_ok = await self._fill_captcha_field(solved)
             if not filled_ok:
                 logger.info(
@@ -1544,24 +1740,43 @@ class IGRFreeSearchScraper:
                     "IGR submit %s: portal rejected captcha — refreshing image.",
                     total_submit,
                 )
-                await self._prepare_captcha_retry(fp_before)
+                await self._prepare_captcha_retry(
+                    fp_before,
+                    **form_retry_kwargs,
+                    recovery_reason="wrong captcha",
+                )
                 continue
 
             if outcome == "timeout":
                 phase2_attempt += 1
+                timeout_attempts += 1
+                consecutive_empty_ocr = 0
                 self._save_raw_search_html(
                     html,
                     survey_number=survey_number,
                     year=year,
                     attempt=phase2_attempt,
                 )
+                if timeout_attempts >= IGR_YEAR_TIMEOUT_ATTEMPTS:
+                    return await self._skip_year_as_empty(
+                        year,
+                        reason=(
+                            f"RegistrationGrid not ready after {timeout_attempts} "
+                            f"timeout(s) of {IGR_RESULTS_WAIT_SECONDS:.0f}s"
+                        ),
+                    )
                 logger.warning(
                     "IGR phase-2 attempt %s/%s: RegistrationGrid not ready within %.0fs; retrying.",
                     phase2_attempt,
                     MAX_CAPTCHA_RETRIES,
                     IGR_RESULTS_WAIT_SECONDS,
                 )
-                await self._prepare_captcha_retry(fp_before)
+                await self._prepare_captcha_retry(
+                    fp_before,
+                    **form_retry_kwargs,
+                    force_full_recovery=True,
+                    recovery_reason="RegistrationGrid timeout",
+                )
                 continue
 
             if outcome == "zero":
@@ -1572,14 +1787,10 @@ class IGRFreeSearchScraper:
                     year=year,
                     attempt=phase2_attempt,
                 )
-                logger.info(
-                    "IGR phase-2 attempt %s/%s: portal confirmed zero results for year=%r.",
-                    phase2_attempt,
-                    MAX_CAPTCHA_RETRIES,
+                return await self._skip_year_as_empty(
                     year,
+                    reason="portal confirmed zero results",
                 )
-                await self._click_cancel_for_next_year()
-                return []
 
             if outcome != "grid":
                 phase2_attempt += 1
@@ -1589,7 +1800,11 @@ class IGRFreeSearchScraper:
                     MAX_CAPTCHA_RETRIES,
                     outcome,
                 )
-                await self._prepare_captcha_retry(fp_before)
+                await self._prepare_captcha_retry(
+                    fp_before,
+                    **form_retry_kwargs,
+                    recovery_reason=f"unexpected outcome {outcome!r}",
+                )
                 continue
 
             phase2_attempt += 1
@@ -1600,15 +1815,11 @@ class IGRFreeSearchScraper:
                 attempt=phase2_attempt,
             )
             # Portal shows this Marathi phrase when a year genuinely has no records.
-            if _IGR_ZERO_RESULTS_PHRASE in html:
-                logger.info(
-                    "IGR phase-2 attempt %s/%s: portal confirmed zero results for year=%r.",
-                    phase2_attempt,
-                    MAX_CAPTCHA_RETRIES,
+            if self._html_indicates_zero_results(html):
+                return await self._skip_year_as_empty(
                     year,
+                    reason="portal confirmed zero results after grid check",
                 )
-                await self._click_cancel_for_next_year()
-                return []
 
             parsed = await self._collect_all_registration_grid_pages(
                 html,
@@ -1619,13 +1830,10 @@ class IGRFreeSearchScraper:
             if parsed:
                 meaningful = self._meaningful_result_rows(parsed)
                 if not meaningful:
-                    logger.info(
-                        "IGR phase-2 attempt %s/%s: only placeholder/menu rows found; treating as zero-result year.",
-                        phase2_attempt,
-                        MAX_CAPTCHA_RETRIES,
+                    return await self._skip_year_as_empty(
+                        year,
+                        reason="only placeholder/menu rows in RegistrationGrid",
                     )
-                    await self._click_cancel_for_next_year()
-                    return []
                 logger.info(
                     "IGR search success: survey=%r year=%r rows=%s meaningful=%s (phase2_attempt=%s).",
                     survey_number,
@@ -1647,14 +1855,18 @@ class IGRFreeSearchScraper:
                 phase2_attempt,
                 MAX_CAPTCHA_RETRIES,
             )
-            await self._prepare_captcha_retry(fp_before)
+            await self._prepare_captcha_retry(
+                fp_before,
+                **form_retry_kwargs,
+                force_full_recovery=True,
+                recovery_reason="grid parsed but no meaningful rows",
+            )
         logger.warning(
-            "IGR search exhausted captcha attempts: survey=%r year=%r",
+            "IGR search exhausted attempts: survey=%r year=%r — skipping year.",
             survey_number,
             year,
         )
-        await self._click_cancel_for_next_year()
-        raise RuntimeError(
-            f"IGR search failed: RegistrationGrid not found for survey={survey_number!r} "
-            f"year={year!r} after {MAX_CAPTCHA_RETRIES} phase-2 attempts"
+        return await self._skip_year_as_empty(
+            year,
+            reason=f"exhausted {MAX_CAPTCHA_RETRIES} phase-2 attempts without results",
         )
