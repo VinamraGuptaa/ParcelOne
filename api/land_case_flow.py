@@ -101,6 +101,55 @@ def _normalize_name(name: str) -> str:
     return " ".join(tokens)
 
 
+# Trailing tokens eCourts sometimes glues onto party names (not part of the person).
+_PARTY_SUFFIX_NOISE = frozenset({"minor", "minors", "deceased"})
+
+
+def _normalize_party_name_tokens(name: str) -> list[str]:
+    """
+    Normalize a party/owner name and strip trailing eCourts noise (Option A).
+
+    Examples: ``Rekha Vijay Mirajkar 9`` → ``rekha vijay mirajkar``
+    """
+    toks = _normalize_name(name).split()
+    while toks and toks[-1].isdigit():
+        toks.pop()
+    while toks and toks[-1] in _PARTY_SUFFIX_NOISE:
+        toks.pop()
+    return toks
+
+
+def _owner_tokens_contiguous_in_party(owner_toks: list[str], party_toks: list[str]) -> bool:
+    """
+    True when all owner tokens appear in order as one contiguous block in party (Option B).
+    """
+    if not owner_toks or not party_toks:
+        return False
+    if len(owner_toks) == 1:
+        # Single-token owners must match the whole party entry, not a longer name.
+        return party_toks == owner_toks
+    if len(owner_toks) > len(party_toks):
+        return False
+    n = len(owner_toks)
+    for i in range(len(party_toks) - n + 1):
+        if party_toks[i : i + n] == owner_toks:
+            return True
+    return False
+
+
+def _party_name_matches_owner(party: str, owner: str) -> bool:
+    """Match owner to one petitioner/respondent entry (noise-tolerant)."""
+    owner_toks = _normalize_name(owner).split()
+    party_toks = _normalize_party_name_tokens(party)
+    if not owner_toks or not party_toks:
+        return False
+    if owner_toks == party_toks:
+        return True
+    if "".join(owner_toks) == "".join(party_toks):
+        return True
+    return _owner_tokens_contiguous_in_party(owner_toks, party_toks)
+
+
 def _owner_side_purity(rec: dict, variants: list[str]) -> float:
     """
     Fraction of names on the *best* party side (petitioners or respondents) that
@@ -166,6 +215,8 @@ def owner_name_exact_in_parties(parties_text: str, owner: str) -> bool:
 
 def _names_exact_equivalent(left: str, right: str) -> bool:
     """True when two party/owner names are the same person (spacing/case tolerant)."""
+    if _party_name_matches_owner(left, right) or _party_name_matches_owner(right, left):
+        return True
     left_norm = _normalize_name(left)
     right_norm = _normalize_name(right)
     if not left_norm or not right_norm:

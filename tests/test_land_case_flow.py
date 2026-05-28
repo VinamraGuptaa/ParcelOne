@@ -109,9 +109,25 @@ def test_record_matches_owner_names_exact_requires_full_party_name():
         {"petitioners": ["Lata Arun Walunjkar"], "respondents": ["Krushna Sakharam Narke"]},
         owners,
     )
+
+
+def test_record_matches_owner_with_trailing_digit_noise():
+    """eCourts often appends digits to party names: 'Rekha Vijay Mirajkar 9'."""
+    owner = "Rekha Vijay Mirajkar"
+    parties = "Amol Rohidas Mirajkar v. Rekha Vijay Mirajkar 9"
+    assert record_matches_owner_names_exact(
+        {
+            "parties_text": parties,
+            "petitioners": ["Amol Rohidas Mirajkar"],
+            "respondents": ["Rekha Vijay Mirajkar 9"],
+        },
+        [owner],
+    )
+    assert _names_exact_equivalent(owner, "Rekha Vijay Mirajkar 9")
+    assert not _names_exact_equivalent("Alice", "Alice Patil")
     assert not record_matches_owner_names_exact(
-        {"petitioners": ["Snehalata Vilas Gore"], "respondents": ["Arun Bhagwan Narke"]},
-        owners,
+        {"respondents": ["Alice Patil"]},
+        ["Alice"],
     )
 
 

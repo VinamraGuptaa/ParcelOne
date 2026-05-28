@@ -854,6 +854,37 @@ class IGRFreeSearchScraper:
         await self._close_startup_popup()
         await self._switch_to_rest_of_maharashtra_tab()
 
+    async def _ensure_rest_maharashtra_form_ready(self, timeout_s: float = 20.0) -> None:
+        """Wait until Rest-of-MH district dropdown is present."""
+        assert self.page is not None
+        deadline = asyncio.get_event_loop().time() + timeout_s
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                if await self.page.locator(SEL_DISTRICT).count() > 0:
+                    return
+            except Exception:
+                pass
+            await self._close_startup_popup()
+            await self._switch_to_rest_of_maharashtra_tab()
+            await asyncio.sleep(0.5)
+        raise RuntimeError("IGR Rest-of-Maharashtra form not ready (district dropdown missing).")
+
+    async def list_location_options(self, level: str) -> list[dict[str, str]]:
+        """Return district/taluka/village dropdown options from the IGR search form."""
+        from api.location_labels import is_placeholder_label
+
+        assert self.page is not None
+        await self._ensure_rest_maharashtra_form_ready()
+        selector = {
+            "district": SEL_DISTRICT,
+            "taluka": SEL_TALUKA,
+            "village": SEL_VILLAGE,
+        }.get(level)
+        if not selector:
+            raise ValueError(f"Unknown location level: {level!r}")
+        options = await self._get_select_options(selector)
+        return [o for o in options if not is_placeholder_label(o.get("label", ""))]
+
     async def _hard_reset_igr_search_form(
         self,
         *,
@@ -1036,14 +1067,9 @@ class IGRFreeSearchScraper:
 
     @staticmethod
     def _expand_needles(label: str) -> list[str]:
-        base = _sanitize_label_input(label).lower()
-        if not base:
-            return []
-        out = [base]
-        extra = _LABEL_ALIASES.get(base)
-        if extra:
-            out.extend(extra)
-        return out
+        from api.location_labels import expand_label_needles
+
+        return expand_label_needles(label)
 
     @staticmethod
     def _match_option_label(option_label: str, wanted: str) -> bool:
@@ -1634,6 +1660,23 @@ class IGRFreeSearchScraper:
             IGR_RESULTS_WAIT_SECONDS,
             IGR_PENDING_STALL_SECONDS,
         )
+        from api.location_labels import resolve_igr_labels
+
+        mapped_d, mapped_t, mapped_v, map_method = resolve_igr_labels(
+            district_label, taluka_label, village_label
+        )
+        if map_method:
+            logger.info(
+                "IGR location map applied (%s): bhulekh=%r/%r/%r -> igr=%r/%r/%r",
+                map_method,
+                district_label,
+                taluka_label,
+                village_label,
+                mapped_d,
+                mapped_t,
+                mapped_v,
+            )
+            district_label, taluka_label, village_label = mapped_d, mapped_t, mapped_v
         # If the page has drifted off the portal (blank page, error page, or
         # a previous navigation left it somewhere unexpected), reload it now so
         # _fill_search_form starts from a known-good state.
