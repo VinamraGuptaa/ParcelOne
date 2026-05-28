@@ -39,8 +39,9 @@ IGR_GOTO_TIMEOUT_MS = int(os.getenv("IGR_GOTO_TIMEOUT_MS", "90000"))
 IGR_GOTO_RETRIES = int(os.getenv("IGR_GOTO_RETRIES", "3"))
 # How long to poll for RegistrationGrid / zero-results text after Search submit.
 IGR_RESULTS_WAIT_SECONDS = float(os.getenv("IGR_RESULTS_WAIT_SECONDS", "45"))
-# If the page stays indeterminate (no grid/zero/captcha change), skip the year after this many seconds.
-IGR_PENDING_STALL_SECONDS = float(os.getenv("IGR_PENDING_STALL_SECONDS", "20"))
+# Optional early skip when the page stays indeterminate. 0 = disabled (wait full results_wait).
+# Do not set this too low — IGR often needs 25–40s after a correct captcha before the grid appears.
+IGR_PENDING_STALL_SECONDS = float(os.getenv("IGR_PENDING_STALL_SECONDS", "0"))
 # After this many consecutive empty OCR reads, reload the portal and refill the form.
 IGR_EMPTY_OCR_RECOVERY_THRESHOLD = int(os.getenv("IGR_EMPTY_OCR_RECOVERY_THRESHOLD", "3"))
 
@@ -624,6 +625,29 @@ class IGRFreeSearchScraper:
                 continue
         return ""
 
+    _PAGE_LOADING_JS = """() => {
+        const prm = (window.Sys && window.Sys.WebForms && window.Sys.WebForms.PageRequestManager)
+            ? window.Sys.WebForms.PageRequestManager.getInstance()
+            : null;
+        if (prm && prm.get_isInAsyncPostBack()) return true;
+        const progressIds = ['UpdateProgress1', 'UpdateProgress4'];
+        return progressIds.some((id) => {
+            const el = document.getElementById(id);
+            if (!el) return false;
+            const cs = window.getComputedStyle(el);
+            if (!cs) return false;
+            return cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0';
+        });
+    }"""
+
+    async def _is_igr_page_loading(self) -> bool:
+        """True while ASP.NET async postback or UpdateProgress overlay is active."""
+        assert self.page is not None
+        try:
+            return bool(await self.page.evaluate(self._PAGE_LOADING_JS))
+        except Exception:
+            return False
+
     async def _wait_for_postback_settle(self, timeout_s: float = 20.0) -> None:
         """
         Wait for ASP.NET async postback/progress overlays to fully settle.
@@ -632,24 +656,7 @@ class IGRFreeSearchScraper:
         deadline = asyncio.get_event_loop().time() + timeout_s
         while asyncio.get_event_loop().time() < deadline:
             try:
-                settled = await self.page.evaluate(
-                    """() => {
-                        const prm = (window.Sys && window.Sys.WebForms && window.Sys.WebForms.PageRequestManager)
-                            ? window.Sys.WebForms.PageRequestManager.getInstance()
-                            : null;
-                        const inAsync = prm ? prm.get_isInAsyncPostBack() : false;
-                        const progressIds = ['UpdateProgress1', 'UpdateProgress4'];
-                        const visibleProgress = progressIds.some((id) => {
-                            const el = document.getElementById(id);
-                            if (!el) return false;
-                            const cs = window.getComputedStyle(el);
-                            if (!cs) return false;
-                            return cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0';
-                        });
-                        return !inAsync && !visibleProgress;
-                    }"""
-                )
-                if settled:
+                if not await self._is_igr_page_loading():
                     return
             except Exception:
                 pass
@@ -766,15 +773,31 @@ class IGRFreeSearchScraper:
                     wait_s,
                 )
                 return outcome, last_html
+            still_loading = await self._is_igr_page_loading()
             if (
-                elapsed_s >= IGR_PENDING_STALL_SECONDS
+                IGR_PENDING_STALL_SECONDS > 0
+                and elapsed_s >= IGR_PENDING_STALL_SECONDS
                 and not self._page_html_has_registration_grid(last_html)
+                and not still_loading
             ):
                 logger.info(
-                    "IGR no grid/zero/captcha change after %ds — treating year as empty.",
+                    "IGR no grid/zero/captcha change after %ds (loading=%s captcha_status=%r) — treating year as empty.",
                     elapsed_s,
+                    still_loading,
+                    status_text[:80] if status_text else "",
                 )
                 return "pending_stall", last_html
+            if (
+                IGR_PENDING_STALL_SECONDS > 0
+                and elapsed_s >= IGR_PENDING_STALL_SECONDS
+                and still_loading
+                and elapsed_s in (int(IGR_PENDING_STALL_SECONDS), int(IGR_PENDING_STALL_SECONDS) + 10)
+            ):
+                logger.info(
+                    "IGR still loading after %ds (UpdateProgress/async postback active) — continuing to wait up to %.0fs.",
+                    elapsed_s,
+                    wait_s,
+                )
             if elapsed_s in (10, 20, 30, 40) or (elapsed_s % 15 == 0 and elapsed_s <= int(wait_s)):
                 logger.info(
                     "IGR still waiting for RegistrationGrid or zero-results text… %ds elapsed.",
