@@ -20,6 +20,7 @@ from api.land_case_flow import (
     dedupe_case_key,
     extract_land_entity,
     extract_survey_option_labels,
+    is_pending_case,
     rank_api_case_hits,
     rank_case_hits,
     record_matches_owner_names_exact,
@@ -132,11 +133,12 @@ _AREA_UNIT_TOKENS = frozenset([
 #   "गट नंबर 1530 हिस्सा नंबर 3"
 #   "गट क्रमांक 1530 हिस्सा क्रमांक 3"
 #   "ग.नं 970"                       (abbreviated Gat number — common in IGR lists)
-#   "स.नं. 1530 हिस्सा 3"           (सर्वे नं prefix, no गट)
-#   "सर्वे नं. 1530 भाग 3"           (भाग = part, alternative to हिस्सा)
-_NUM_LABEL = r"(?:नंबर|नं\.?|क्रमांक|क्र\.?|क्रं\.?|no\.?|num\.?|number)?"
+#   "गट न. 3954"                    (short Gat label — न. without anusvara)
+_NUM_LABEL = r"(?:नंबर|नं\.?|न\.?|क्रमांक|क्र\.?|क्रं\.?|no\.?|num\.?|number)?"
 # Abbreviated Gat label used standalone (ग.नं / ग. नं. / ग.नं.)
 _GAT_ABBREV_LABEL = r"(?:ग\.?\s*नं\.?)"
+# Short Gat label: "गट न." / "गट न" (common in IGR property descriptions)
+_GAT_SHORT_NA_LABEL = r"(?:गट\s*न\.?)"
 # Gat/Survey prefix — also matches abbreviated Gat (ग.नं) and सर्वे prefixes (स.नं.)
 _GAT_LABEL = (
     r"(?:(?:गट|gut|gat)"
@@ -198,7 +200,10 @@ def _gat_label_before(window: str) -> bool:
     if re.search(_GAT_LABEL + r"\s*$", window, re.IGNORECASE | re.UNICODE):
         return True
     # Glued form "ग.नं970" — abbrev immediately precedes digits with no trailing space.
-    return bool(re.search(_GAT_ABBREV_LABEL + r"\s*$", window, re.IGNORECASE | re.UNICODE))
+    if re.search(_GAT_ABBREV_LABEL + r"\s*$", window, re.IGNORECASE | re.UNICODE):
+        return True
+    # "गट न. 3954" — short Gat label without anusvara (न. not नं.)
+    return bool(re.search(_GAT_SHORT_NA_LABEL + r"\s*$", window, re.IGNORECASE | re.UNICODE))
 
 
 def _has_required_survey_label(hay: str, start: int) -> bool:
@@ -273,6 +278,17 @@ def _contains_exact_survey_token(text: str, survey_token: str) -> bool:
             if _accept_igr_survey_match(hay, tok_start, m.end(), survey_token):
                 return True
 
+    # ── 1c. Short Gat label + bare number: "गट न. 3954" / "गट न3954" ───────
+    for tok in toks:
+        gat_short_num = re.compile(
+            rf"{_GAT_SHORT_NA_LABEL}\s*\.?\s*{re.escape(tok)}(?![0-9a-z\u0900-\u097f])",
+            re.IGNORECASE | re.UNICODE,
+        )
+        for m in gat_short_num.finditer(hay):
+            tok_start = m.end() - len(tok)
+            if _accept_igr_survey_match(hay, tok_start, m.end(), survey_token):
+                return True
+
     if "/" not in survey_token:
         return False
 
@@ -332,10 +348,7 @@ def _contains_exact_survey_token(text: str, survey_token: str) -> bool:
 
 
 def _case_bool_pending(case_status: str) -> bool:
-    status = (case_status or "").strip().lower()
-    if not status:
-        return False
-    return "pending" in status and "disposed" not in status
+    return is_pending_case(case_status)
 
 
 def _to_text(value: Any) -> str | None:

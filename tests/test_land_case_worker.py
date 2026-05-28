@@ -61,6 +61,13 @@ def test_accepts_abbreviated_gat_number_label():
     assert _contains_exact_survey_token("area 970 sqft", "970") is False
 
 
+def test_accepts_short_gat_na_label():
+    assert _contains_exact_survey_token("मिळकत गट न. 3954 तालेगाव", "3954") is True
+    assert _contains_exact_survey_token("गट न.3954", "3954") is True
+    assert _contains_exact_survey_token("गट न 3954", "3954") is True
+    assert _contains_exact_survey_token("area 3954 sqft", "3954") is False
+
+
 def test_accepts_old_survey_number_with_label():
     text = "जुना सर्वे नंबर 70/2ब नवीन गट 576/ ब"
     assert _contains_exact_survey_token(text, "70/2") is False

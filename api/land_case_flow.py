@@ -42,8 +42,9 @@ LOCATION_ALIASES = {
     "पुणे": ("pune",),
     "haveli": ("हवेली",),
     "हवेली": ("haveli",),
-    "shirur": ("शिरूर",),
-    "शिरूर": ("shirur",),
+    "shirur": ("शिरूर", "ghodnadi"),
+    "शिरूर": ("shirur", "ghodnadi"),
+    "ghodnadi": ("shirur", "शिरूर"),
     "talegaon dhamdhere": ("तालेगाव धामधरे",),
     "तालेगाव धामधरे": ("talegaon dhamdhere",),
 }
@@ -589,8 +590,10 @@ def is_civil_case(case_type: str | None) -> bool:
 def is_pending_case(case_status: str | None) -> bool:
     txt = (case_status or "").strip().lower()
     if not txt:
-        return True
-    return "pending" in txt and "disposed" not in txt
+        return False
+    if any(word in txt for word in ("disposed", "closed", "dismissed", "withdrawn", "decided")):
+        return False
+    return "pending" in txt or txt in ("active", "running")
 
 
 def _party_overlap_score(parties_text: str, party_names: list[str]) -> float:
@@ -972,13 +975,13 @@ def rank_api_case_hits(
     out.sort(
         key=lambda h: (
             -h.owner_match_count,                                                # 1st: most owners matched (5→4→3→2→1)
-            -h.owner_side_purity,                                                # 2nd: matched owners dominate their side
-            -(h.owner_match_count / h.owner_total) if h.owner_total else 0.0,   # 3rd: match density tiebreak
-            not h.primary_name_matched,                                          # 4th: prefer 7/12 Bhulekh match
-            -h.village_location_score,                                           # 5th: village court match
-            -h.taluka_location_score,                                            # 6th: taluka court match
-            -h.district_location_score,                                          # 7th: district court match (weakest)
-            not h.is_pending,                                                    # 8th: pending cases first
+            not h.is_pending,                                                    # 2nd: active/pending before closed/disposed
+            -h.owner_side_purity,                                                # 3rd: matched owners dominate their side
+            -(h.owner_match_count / h.owner_total) if h.owner_total else 0.0,   # 4th: match density tiebreak
+            not h.primary_name_matched,                                          # 5th: prefer 7/12 Bhulekh match
+            -h.village_location_score,                                           # 6th: village court match
+            -h.taluka_location_score,                                            # 7th: taluka court match
+            -h.district_location_score,                                          # 8th: district court match (weakest)
             -h.name_match_score,                                                 # 9th: overall score
             h.search_year or "9999",
         )

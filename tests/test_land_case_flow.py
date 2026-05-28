@@ -8,6 +8,7 @@ from api.land_case_flow import (
     build_name_variants,
     extract_survey_option_labels,
     extract_land_entity,
+    is_pending_case,
     owner_name_exact_in_parties,
     rank_case_hits,
     rank_api_case_hits,
@@ -374,6 +375,61 @@ def test_rank_api_case_hits_prioritizes_shirur_taluka_over_pune_district_court()
     assert out[1].taluka_location_score == 0.0
 
 
+def test_rank_api_case_hits_pending_beats_closed_when_ghodnadi_court_omits_shirur():
+    """Prod API may return GHODNADI without SHIRUR — pending must still rank above closed."""
+    parties = "Arun Prabhakar Narke v. Mohini Mahesh Sondekar"
+    records = [
+        {
+            "case_id": "PUNE_BENCH",
+            "case_type": "CS",
+            "case_status": "Closed",
+            "petitioners": ["Arun Prabhakar Narke"],
+            "respondents": ["Mohini Mahesh Sondekar"],
+            "parties_text": parties,
+            "court": "CIVIL COURT PUNE MAHARASHTRA",
+            "search_year": "2021",
+            "cnr": "MHPU020081482021",
+        },
+        {
+            "case_id": "GHODNADI_BENCH",
+            "case_type": "CS",
+            "case_status": "Pending",
+            "petitioners": ["Arun Prabhakar Narke"],
+            "respondents": ["Mohini Mahesh Sondekar"],
+            "parties_text": parties,
+            "court": "CIVIL COURT SENIOR DIVISION GHODNADI",
+            "search_year": "2026",
+            "cnr": "MHPU390009782026",
+        },
+    ]
+    out = rank_api_case_hits(
+        records,
+        owner_name="Arun Prabhakar Narke",
+        owner_names=["Arun Prabhakar Narke", "Mohini Mahesh Sondekar"],
+        primary_owner_names=["Arun Prabhakar Narke", "Mohini Mahesh Sondekar"],
+        igr_party_names=[],
+        district_label="Pune",
+        taluka_label="Shirur",
+        village_label="Talegaon Dhamdhere",
+        min_score=0.0,
+    )
+    assert len(out) == 2
+    assert out[0].case_id == "GHODNADI_BENCH"
+    assert out[0].is_pending is True
+    assert out[1].case_id == "PUNE_BENCH"
+    assert out[1].is_pending is False
+
+
+def test_is_pending_case():
+    assert is_pending_case("Pending") is True
+    assert is_pending_case("PENDING") is True
+    assert is_pending_case("Closed") is False
+    assert is_pending_case("Disposed") is False
+    assert is_pending_case("Dismissed") is False
+    assert is_pending_case("") is False
+    assert is_pending_case(None) is False
+
+
 def test_court_location_overlap_prioritizes_village_then_taluka_then_district():
     village, taluka, district = _court_location_tier_scores(
         "CIVIL COURT SENIOR DIVISION GHODNADI SHIRUR",
@@ -392,6 +448,14 @@ def test_court_location_overlap_prioritizes_village_then_taluka_then_district():
         village_label="Talegaon Dhamdhere",
     )
     assert pune_scores == (0.0, 0.0, 1.0)
+
+    ghodnadi_scores = _court_location_tier_scores(
+        "CIVIL COURT SENIOR DIVISION GHODNADI",
+        district_label="Pune",
+        taluka_label="Shirur",
+        village_label="Talegaon Dhamdhere",
+    )
+    assert ghodnadi_scores == (0.0, 1.0, 0.0)
 
     assert _court_location_overlap_score(
         "CIVIL COURT SENIOR DIVISION GHODNADI SHIRUR",
