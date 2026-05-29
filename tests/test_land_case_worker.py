@@ -68,6 +68,14 @@ def test_accepts_short_gat_na_label():
     assert _contains_exact_survey_token("area 3954 sqft", "3954") is False
 
 
+def test_accepts_gat_kramank_label():
+    assert _contains_exact_survey_token("मिळकत गट क्रमांक 970 बाणेर", "970") is True
+    assert _contains_exact_survey_token("गट क्र. 3954", "3954") is True
+    assert _contains_exact_survey_token("गट क्र.3954", "3954") is True
+    assert _contains_exact_survey_token("गट क्रमांक 1530 हिस्सा क्रमांक 3", "1530/3") is True
+    assert _contains_exact_survey_token("पूर्वगामी करारानामा क्र.557/ 2019", "557") is False
+
+
 def test_accepts_old_survey_number_with_label():
     text = "जुना सर्वे नंबर 70/2ब नवीन गट 576/ ब"
     assert _contains_exact_survey_token(text, "70/2") is False
@@ -89,6 +97,22 @@ def test_accepts_comma_separated_hissa_notation():
     assert _contains_exact_survey_token(text, "204/6A") is True
     assert _contains_exact_survey_token("204, हिस्सा नं. 6A", "204/6A") is True
     assert _contains_exact_survey_token("204,हिस्सा 7/1", "204/6A") is False
+
+
+def test_accepts_comma_hi_na_with_kshetra():
+    assert _contains_exact_survey_token("28,हि.नं.1,क्षेत्र", "28/1") is True
+    assert _contains_exact_survey_token("28,हि.नं1,क्षेत्र", "28/1") is True
+    assert _contains_exact_survey_token("204,हि.नं.6अ,क्षेत्र", "204/6A") is True
+    assert _contains_exact_survey_token("1530,हि.नं.3,क्षेत्रफळ", "1530/3") is True
+    assert _contains_exact_survey_token("28,हि.नं.2,क्षेत्र", "28/1") is False
+
+
+def test_accepts_slash_notation_with_kshetra():
+    assert _contains_exact_survey_token("28/1 क्षेत्र", "28/1") is True
+    assert _contains_exact_survey_token("28/1,क्षेत्र", "28/1") is True
+    assert _contains_exact_survey_token("28/1क्षेत्र", "28/1") is True
+    assert _contains_exact_survey_token("204/6A क्षेत्रफळ 100", "204/6A") is True
+    assert _contains_exact_survey_token("28/2 क्षेत्र", "28/1") is False
 
 
 def test_filters_full_target_survey_not_base_only():

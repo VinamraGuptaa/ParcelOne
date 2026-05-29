@@ -21,6 +21,8 @@ _LOCATION_ALIASES: dict[str, tuple[str, ...]] = {
     "pune": ("पुणे", "pune"),
     "satara": ("सातारा", "satara"),
     "sindhudurg": ("सिंधुदुर्ग", "sindhudurg"),
+    "dodamarg": ("दोडामार्ग", "दोदामार्ग", "dodamarg"),
+    "fukeri": ("फुकेरी", "fukeri"),
     "haveli": ("हवेली", "haveli"),
     "khed": ("खेड", "khed"),
     "shirur": ("शिरूर", "shirur", "shirur"),
@@ -226,6 +228,64 @@ def _lookup_key(district: str, taluka: str, village: str) -> str:
     )
 
 
+def _label_match_score(option_label: str, wanted: str) -> float:
+    """Higher = stronger match; 0 = no match."""
+    if not labels_match(option_label, wanted):
+        return 0.0
+    wanted_canonical = canonical_label(wanted)
+    opt_canonical = canonical_label(option_label)
+    if wanted_canonical and wanted_canonical == opt_canonical:
+        return 1.0
+    if wanted_canonical and opt_canonical and wanted_canonical in opt_canonical:
+        return 0.95
+    if wanted_canonical and opt_canonical and opt_canonical in wanted_canonical:
+        # Avoid "केर" matching inside "फुकेरी" unless canonical forms align closely.
+        if len(opt_canonical) >= max(4, len(wanted_canonical) - 1):
+            return 0.9
+        return 0.5
+    return 0.85
+
+
+def _find_lookup_entry(
+    district_label: str,
+    taluka_label: str,
+    village_label: str,
+    lookup: dict[str, dict],
+) -> dict | None:
+    """Match Bhulekh/English labels against map entries when canonical key misses."""
+    district_entries = [
+        entry
+        for entry in lookup.values()
+        if _label_match_score(entry.get("bhulekh_district", ""), district_label) > 0
+    ]
+    if not district_entries:
+        return None
+
+    taluka_entries = [
+        entry
+        for entry in district_entries
+        if _label_match_score(entry.get("bhulekh_taluka", ""), taluka_label) > 0
+    ]
+    if not taluka_entries:
+        return None
+
+    village_options = [
+        {
+            "label": entry.get("bhulekh_village", ""),
+            "value": entry.get("bhulekh_village", ""),
+        }
+        for entry in taluka_entries
+    ]
+    village_match = best_option_match(village_label, village_options)
+    if village_match is None:
+        return None
+
+    for entry in taluka_entries:
+        if entry.get("bhulekh_village", "") == village_match.label:
+            return entry
+    return None
+
+
 def resolve_igr_labels(
     district_label: str,
     taluka_label: str,
@@ -239,7 +299,9 @@ def resolve_igr_labels(
     """
     key = _lookup_key(district_label, taluka_label, village_label)
     lookup = load_location_map().get("lookup") or {}
-    entry = lookup.get(key)
+    entry = lookup.get(key) or _find_lookup_entry(
+        district_label, taluka_label, village_label, lookup
+    )
     if not entry:
         return district_label, taluka_label, village_label, None
 

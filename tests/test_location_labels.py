@@ -58,3 +58,10 @@ def test_build_lookup_and_resolve():
 
 def test_canonical_label_strips_spaces_and_punctuation():
     assert canonical_label("ग. नं. 970") == canonical_label("ग.नं970")
+
+
+def test_fukeri_not_ker_village():
+    options = [{"label": "केर", "value": "केर"}, {"label": "फुकेरी", "value": "फुकेरी"}]
+    match = best_option_match("Fukeri", options)
+    assert match is not None
+    assert match.label == "फुकेरी"

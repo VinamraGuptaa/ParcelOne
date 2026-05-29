@@ -1073,23 +1073,32 @@ class IGRFreeSearchScraper:
 
     @staticmethod
     def _match_option_label(option_label: str, wanted: str) -> bool:
-        o = _sanitize_label_input(option_label).lower()
-        if not o:
+        from api.location_labels import labels_match
+
+        return labels_match(option_label, wanted)
+
+    async def _select_by_label_alias(self, selector: str, desired_label: str) -> bool:
+        from api.location_labels import best_option_match, is_placeholder_label, sanitize_label
+
+        assert self.page is not None
+        options = await self._get_select_options(selector)
+        usable = [
+            o
+            for o in options
+            if sanitize_label(o.get("label", "")) and not is_placeholder_label(o.get("label", ""))
+        ]
+        match = best_option_match(desired_label, usable)
+        if match is None:
             return False
-        for n in IGRFreeSearchScraper._expand_needles(wanted):
-            n = (n or "").strip().lower()
-            if not n:
-                continue
-            if n in o:
-                return True
-            # Labels may include English in parentheses, e.g. पुणे(Pune)
-            for m in re.finditer(r"\(([^)]+)\)", o):
-                inner = (m.group(1) or "").strip().lower()
-                if not inner:
-                    continue
-                if n == inner or n in inner:
-                    return True
-        return False
+        try:
+            if match.value:
+                await self.page.select_option(selector, value=match.value)
+            else:
+                await self.page.select_option(selector, label=match.label)
+            await asyncio.sleep(0.25)
+            return True
+        except Exception:
+            return False
 
     async def _get_select_options(self, selector: str) -> list[dict[str, str]]:
         assert self.page is not None
@@ -1139,43 +1148,6 @@ class IGRFreeSearchScraper:
             except Exception:
                 pass
             await asyncio.sleep(0.2)
-
-    async def _select_by_label_alias(self, selector: str, desired_label: str) -> bool:
-        assert self.page is not None
-        needles = self._expand_needles(desired_label)
-        if not needles:
-            return False
-        try:
-            selected = await self.page.eval_on_selector(
-                selector,
-                """(sel, needles) => {
-                    const norm = (s) => (s || '').toString().trim().toLowerCase();
-                    const wants = (needles || []).map(norm).filter(Boolean);
-                    let chosen = null;
-                    for (const opt of Array.from(sel.options || [])) {
-                        const value = (opt.value || '').trim();
-                        const txt = norm(opt.textContent || '');
-                        if (!value || txt.startsWith('--')) continue;
-                        for (const w of wants) {
-                            if (txt === w || txt.includes(w) || w.includes(txt)) {
-                                chosen = opt;
-                                break;
-                            }
-                        }
-                        if (chosen) break;
-                    }
-                    if (!chosen) return '';
-                    sel.value = chosen.value;
-                    sel.dispatchEvent(new Event('input', {bubbles: true}));
-                    sel.dispatchEvent(new Event('change', {bubbles: true}));
-                    return (chosen.textContent || '').trim();
-                }""",
-                needles,
-            )
-            await asyncio.sleep(0.25)
-            return bool(selected)
-        except Exception:
-            return False
 
     async def _fill_search_form(
         self,

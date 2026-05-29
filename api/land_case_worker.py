@@ -134,6 +134,8 @@ _AREA_UNIT_TOKENS = frozenset([
 #   "गट क्रमांक 1530 हिस्सा क्रमांक 3"
 #   "ग.नं 970"                       (abbreviated Gat number — common in IGR lists)
 #   "गट न. 3954"                    (short Gat label — न. without anusvara)
+#   "28,हि.नं.1,क्षेत्र"            (comma + abbreviated Hissa label + area)
+#   "28/1 क्षेत्र"                  (slash notation followed by area word)
 _NUM_LABEL = r"(?:नंबर|नं\.?|न\.?|क्रमांक|क्र\.?|क्रं\.?|no\.?|num\.?|number)?"
 # Abbreviated Gat label used standalone (ग.नं / ग. नं. / ग.नं.)
 _GAT_ABBREV_LABEL = r"(?:ग\.?\s*नं\.?)"
@@ -150,6 +152,10 @@ _GAT_LABEL = (
 )
 # Hissa/sub-survey separator — हिस्सा, भाग (part), or plain English "hissa"
 _HISSA_LABEL = r"(?:हिस्सा|हिस्से|hissa|हि\.?|ह\.?|भाग)\s*" + _NUM_LABEL
+# Abbreviated Hissa label glued in list notation: "28,हि.नं.1,क्षेत्र"
+_HISSA_ABBREV_NA_LABEL = r"(?:हि\.?\s*नं\.?)"
+# Optional area word after survey token: "28/1 क्षेत्र" / "28/1,क्षेत्र"
+_KSHETRA_SUFFIX = r"(?:\s*,?\s*क्षेत्र(?:फळ)?)"
 
 # False-positive contexts: document/deed numbers, not survey identifiers.
 _DOC_REF_BEFORE = re.compile(
@@ -227,7 +233,11 @@ def _accept_igr_survey_match(hay: str, start: int, end: int, survey_token: str) 
         return False
     if _AREA_AFTER.match(after):
         return False
-    if _DOC_REF_BEFORE.search(before) or _KRAMANK_REF_BEFORE.search(before):
+    if _DOC_REF_BEFORE.search(before):
+        return False
+    # Reject deed/document kramank (e.g. "करारानामा क्र.557") but allow Gat labels
+    # such as "गट क्रमांक 970" / "गट क्र. 3954".
+    if _KRAMANK_REF_BEFORE.search(before) and not _gat_label_before(before):
         return False
     if "/" not in survey_token and _YEAR_SLASH_AFTER.match(after):
         return False
@@ -342,6 +352,25 @@ def _contains_exact_survey_token(text: str, survey_token: str) -> bool:
             re.IGNORECASE | re.UNICODE,
         )
         if _match_accepts_with_base(comma_hissa):
+            return True
+
+    # ── 7b. Comma + abbreviated Hissa: "28,हि.नं.1,क्षेत्र" ───────────────
+    for hissa_tok in hissa_variants:
+        comma_hi_na = re.compile(
+            rf"(?<![0-9]){re.escape(base)}\s*,\s*{_HISSA_ABBREV_NA_LABEL}\s*\.?\s*"
+            rf"{re.escape(hissa_tok)}{_KSHETRA_SUFFIX}?(?![0-9a-z\u0900-\u097f])",
+            re.IGNORECASE | re.UNICODE,
+        )
+        if _match_accepts_with_base(comma_hi_na):
+            return True
+
+    # ── 8. Slash + area word: "28/1 क्षेत्र" / "28/1,क्षेत्र" / "28/1क्षेत्र" ─
+    for hissa_tok in hissa_variants:
+        slash_kshetra = re.compile(
+            rf"(?<![0-9]){re.escape(base)}/{re.escape(hissa_tok)}{_KSHETRA_SUFFIX}(?![0-9a-z\u0900-\u097f])",
+            re.IGNORECASE | re.UNICODE,
+        )
+        if _match_accepts_with_base(slash_kshetra):
             return True
 
     return False
