@@ -42,6 +42,11 @@ IGR_RESULTS_WAIT_SECONDS = float(os.getenv("IGR_RESULTS_WAIT_SECONDS", "45"))
 # Optional early skip when the page stays indeterminate. 0 = disabled (wait full results_wait).
 # Do not set this too low — IGR often needs 25–40s after a correct captcha before the grid appears.
 IGR_PENDING_STALL_SECONDS = float(os.getenv("IGR_PENDING_STALL_SECONDS", "0"))
+# After Search is clicked, if the page stays idle (no grid/zero/captcha change) this long,
+# reload the portal and retry the same year instead of waiting the full results_wait timeout.
+IGR_NO_RESPONSE_SECONDS = float(os.getenv("IGR_NO_RESPONSE_SECONDS", "10"))
+# How many portal refresh + refill attempts per year before skipping it as empty.
+IGR_PAGE_REFRESH_RETRIES = int(os.getenv("IGR_PAGE_REFRESH_RETRIES", str(MAX_CAPTCHA_RETRIES)))
 # After this many consecutive empty OCR reads, reload the portal and refill the form.
 IGR_EMPTY_OCR_RECOVERY_THRESHOLD = int(os.getenv("IGR_EMPTY_OCR_RECOVERY_THRESHOLD", "3"))
 
@@ -735,6 +740,25 @@ class IGRFreeSearchScraper:
         except Exception:
             pass
 
+    @staticmethod
+    def _submit_appears_unresponsive(
+        *,
+        elapsed_s: float,
+        captcha_fp_before: str,
+        captcha_fp_current: str,
+        html: str,
+        still_loading: bool,
+    ) -> bool:
+        """True when Search was clicked but the portal stayed idle (needs page refresh)."""
+        return (
+            IGR_NO_RESPONSE_SECONDS > 0
+            and elapsed_s >= IGR_NO_RESPONSE_SECONDS
+            and not still_loading
+            and captcha_fp_current == captcha_fp_before
+            and not IGRFreeSearchScraper._page_html_has_registration_grid(html)
+            and not IGRFreeSearchScraper._html_indicates_zero_results(html)
+        )
+
     async def _wait_for_igr_search_outcome(
         self,
         captcha_fp_before: str,
@@ -774,6 +798,18 @@ class IGRFreeSearchScraper:
                 )
                 return outcome, last_html
             still_loading = await self._is_igr_page_loading()
+            if self._submit_appears_unresponsive(
+                elapsed_s=elapsed_s,
+                captcha_fp_before=captcha_fp_before,
+                captcha_fp_current=cur_fp,
+                html=last_html,
+                still_loading=still_loading,
+            ):
+                logger.warning(
+                    "IGR search had no response after %ds (captcha unchanged, no grid/zero) — needs page refresh.",
+                    elapsed_s,
+                )
+                return "no_response", last_html
             if (
                 IGR_PENDING_STALL_SECONDS > 0
                 and elapsed_s >= IGR_PENDING_STALL_SECONDS
@@ -1776,6 +1812,7 @@ class IGRFreeSearchScraper:
 
         phase2_attempt = 0
         total_submit = 0
+        page_refresh_attempts = 0
         consecutive_empty_ocr = 0
         max_submits = max(MAX_CAPTCHA_RETRIES * 3, 10)
         form_retry_kwargs = {
@@ -1868,7 +1905,7 @@ class IGRFreeSearchScraper:
                 await self._wait_for_captcha_image_ready(timeout_s=8.0)
                 continue
 
-            if outcome in ("timeout", "pending_stall", "captcha_stall"):
+            if outcome in ("no_response", "timeout", "pending_stall", "captcha_stall"):
                 phase2_attempt += 1
                 consecutive_empty_ocr = 0
                 self._save_raw_search_html(
@@ -1878,10 +1915,34 @@ class IGRFreeSearchScraper:
                     attempt=phase2_attempt,
                 )
                 stall_reason = {
+                    "no_response": f"search click had no effect within {IGR_NO_RESPONSE_SECONDS:.0f}s",
                     "pending_stall": f"no grid after {IGR_PENDING_STALL_SECONDS:.0f}s pending",
                     "captcha_stall": "captcha accepted but no grid",
                 }.get(outcome, f"RegistrationGrid not ready within {IGR_RESULTS_WAIT_SECONDS:.0f}s")
-                return await self._skip_year_as_empty(year, reason=stall_reason)
+                page_refresh_attempts += 1
+                if page_refresh_attempts >= IGR_PAGE_REFRESH_RETRIES:
+                    logger.warning(
+                        "IGR year=%r survey=%r: %s after %s page refresh attempts — skipping year.",
+                        year,
+                        survey_number,
+                        stall_reason,
+                        page_refresh_attempts,
+                    )
+                    return await self._skip_year_as_empty(year, reason=stall_reason)
+                logger.warning(
+                    "IGR year=%r survey=%r: %s — reloading portal and retrying (%s/%s).",
+                    year,
+                    survey_number,
+                    stall_reason,
+                    page_refresh_attempts,
+                    IGR_PAGE_REFRESH_RETRIES,
+                )
+                await self._recover_search_page_after_stall(
+                    **form_retry_kwargs,
+                    reason=stall_reason,
+                    previous_captcha_fp=fp_before,
+                )
+                continue
 
             if outcome == "wrong_captcha":
                 logger.info(

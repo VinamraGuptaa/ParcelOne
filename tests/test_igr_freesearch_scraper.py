@@ -228,3 +228,53 @@ def test_parse_registration_grid_excludes_pager_row():
     assert len(rows) >= 10
     assert all(r.get("DocNo") for r in rows)
     assert all("Page$" not in (r.get("_row_text") or "") for r in rows)
+
+
+def test_submit_appears_unresponsive_idle_form(monkeypatch):
+    monkeypatch.setenv("IGR_NO_RESPONSE_SECONDS", "10")
+    from importlib import reload
+
+    import igr_freesearch_scraper as mod
+
+    reload(mod)
+    html = "<html><form><input id='txtImg1'></form></html>"
+    assert mod.IGRFreeSearchScraper._submit_appears_unresponsive(
+        elapsed_s=10,
+        captcha_fp_before="fp1",
+        captcha_fp_current="fp1",
+        html=html,
+        still_loading=False,
+    )
+
+
+def test_submit_appears_unresponsive_not_when_captcha_rotated(monkeypatch):
+    monkeypatch.setenv("IGR_NO_RESPONSE_SECONDS", "10")
+    from importlib import reload
+
+    import igr_freesearch_scraper as mod
+
+    reload(mod)
+    html = "<html><form></form></html>"
+    assert not mod.IGRFreeSearchScraper._submit_appears_unresponsive(
+        elapsed_s=10,
+        captcha_fp_before="fp1",
+        captcha_fp_current="fp2",
+        html=html,
+        still_loading=False,
+    )
+
+
+def test_submit_appears_unresponsive_not_while_loading(monkeypatch):
+    monkeypatch.setenv("IGR_NO_RESPONSE_SECONDS", "10")
+    from importlib import reload
+
+    import igr_freesearch_scraper as mod
+
+    reload(mod)
+    assert not mod.IGRFreeSearchScraper._submit_appears_unresponsive(
+        elapsed_s=10,
+        captcha_fp_before="fp1",
+        captcha_fp_current="fp1",
+        html="<html></html>",
+        still_loading=True,
+    )
