@@ -1077,28 +1077,93 @@ class IGRFreeSearchScraper:
 
         return labels_match(option_label, wanted)
 
-    async def _select_by_label_alias(self, selector: str, desired_label: str) -> bool:
+    @staticmethod
+    def _pick_option_match(desired_label: str, options: list[dict[str, str]]):
         from api.location_labels import best_option_match, is_placeholder_label, sanitize_label
 
-        assert self.page is not None
-        options = await self._get_select_options(selector)
         usable = [
             o
             for o in options
             if sanitize_label(o.get("label", "")) and not is_placeholder_label(o.get("label", ""))
         ]
-        match = best_option_match(desired_label, usable)
+        return best_option_match(desired_label, usable), usable
+
+    async def _select_by_label_alias(self, selector: str, desired_label: str) -> bool:
+        from api.location_labels import sanitize_label
+
+        assert self.page is not None
+        try:
+            options = await self._get_select_options(selector)
+        except Exception as exc:
+            logger.warning("IGR select %s: could not read options for %r: %s", selector, desired_label, exc)
+            return False
+
+        match, usable = self._pick_option_match(desired_label, options)
         if match is None:
+            sample = [sanitize_label(o.get("label", "")) for o in usable[:8]]
+            logger.warning(
+                "IGR select %s: no match for %r (%s usable options, sample=%r)",
+                selector,
+                desired_label,
+                len(usable),
+                sample,
+            )
             return False
         try:
-            if match.value:
-                await self.page.select_option(selector, value=match.value)
-            else:
-                await self.page.select_option(selector, label=match.label)
+            selected_label = await self.page.eval_on_selector(
+                selector,
+                """(sel, value) => {
+                    const target = (value || '').trim();
+                    let chosen = null;
+                    for (const opt of Array.from(sel.options || [])) {
+                        if (((opt.value || '').trim()) === target) {
+                            chosen = opt;
+                            break;
+                        }
+                    }
+                    if (!chosen) return '';
+                    sel.value = chosen.value;
+                    sel.dispatchEvent(new Event('input', {bubbles: true}));
+                    sel.dispatchEvent(new Event('change', {bubbles: true}));
+                    return (chosen.textContent || '').trim();
+                }""",
+                (match.value or "").strip(),
+            )
             await asyncio.sleep(0.25)
+            if not selected_label:
+                logger.warning(
+                    "IGR select %s: option value=%r not found after match label=%r",
+                    selector,
+                    match.value,
+                    match.label,
+                )
+                return False
             return True
-        except Exception:
+        except Exception as exc:
+            logger.warning("IGR select %s failed for %r: %s", selector, desired_label, exc)
             return False
+
+    async def _wait_for_cascade_ready(
+        self,
+        selector: str,
+        desired_label: str,
+        *,
+        timeout_s: float = 18.0,
+    ) -> bool:
+        """Wait until a cascading dropdown lists a match for the desired label."""
+        assert self.page is not None
+        deadline = asyncio.get_event_loop().time() + timeout_s
+        while asyncio.get_event_loop().time() < deadline:
+            await self._wait_for_postback_settle(timeout_s=3.0)
+            try:
+                options = await self._get_select_options(selector)
+            except Exception:
+                options = []
+            match, usable = self._pick_option_match(desired_label, options)
+            if match is not None and len(usable) >= 1:
+                return True
+            await asyncio.sleep(0.35)
+        return False
 
     async def _get_select_options(self, selector: str) -> list[dict[str, str]]:
         assert self.page is not None
@@ -1173,12 +1238,24 @@ class IGRFreeSearchScraper:
                 year_ok = await self._select_by_label_alias(SEL_YEAR, year)
             district_ok = await self._select_by_label_alias(SEL_DISTRICT, district_label)
             await self._wait_for_postback_settle(timeout_s=12.0)
-            await self._wait_for_option_growth(SEL_TALUKA, min_count=2)
-            await self._wait_for_select_populated(SEL_TALUKA, timeout_s=12.0)
+            if not await self._wait_for_cascade_ready(SEL_TALUKA, taluka_label, timeout_s=18.0):
+                logger.info(
+                    "IGR taluka options not ready after district=%r; re-selecting district to trigger postback.",
+                    district_label,
+                )
+                district_ok = await self._select_by_label_alias(SEL_DISTRICT, district_label)
+                await self._wait_for_postback_settle(timeout_s=12.0)
+                await self._wait_for_cascade_ready(SEL_TALUKA, taluka_label, timeout_s=18.0)
             taluka_ok = await self._select_by_label_alias(SEL_TALUKA, taluka_label)
             await self._wait_for_postback_settle(timeout_s=12.0)
-            await self._wait_for_option_growth(SEL_VILLAGE, min_count=2)
-            await self._wait_for_select_populated(SEL_VILLAGE, timeout_s=12.0)
+            if not await self._wait_for_cascade_ready(SEL_VILLAGE, village_label, timeout_s=18.0):
+                logger.info(
+                    "IGR village options not ready after taluka=%r; re-selecting taluka to trigger postback.",
+                    taluka_label,
+                )
+                taluka_ok = await self._select_by_label_alias(SEL_TALUKA, taluka_label)
+                await self._wait_for_postback_settle(timeout_s=12.0)
+                await self._wait_for_cascade_ready(SEL_VILLAGE, village_label, timeout_s=18.0)
             village_ok = await self._select_by_label_alias(SEL_VILLAGE, village_label)
             if district_ok and taluka_ok and village_ok:
                 break
@@ -1649,6 +1726,25 @@ class IGRFreeSearchScraper:
                 mapped_v,
             )
             district_label, taluka_label, village_label = mapped_d, mapped_t, mapped_v
+        else:
+            from api.location_labels import location_map_path
+
+            map_path = location_map_path()
+            if not map_path.is_file():
+                logger.warning(
+                    "IGR location map missing at %s; using Bhulekh labels %r/%r/%r",
+                    map_path,
+                    district_label,
+                    taluka_label,
+                    village_label,
+                )
+            else:
+                logger.info(
+                    "IGR location map: no entry for %r/%r/%r; using labels as-is",
+                    district_label,
+                    taluka_label,
+                    village_label,
+                )
         # If the page has drifted off the portal (blank page, error page, or
         # a previous navigation left it somewhere unexpected), reload it now so
         # _fill_search_form starts from a known-good state.

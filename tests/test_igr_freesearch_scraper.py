@@ -60,6 +60,31 @@ def test_meaningful_result_rows_filters_placeholder_rows():
     assert "DocNo 0011" in meaningful[0]["_row_text"]
 
 
+def test_pick_option_match_pune_khed_taluka():
+    taluka_options = [
+        {"label": "---Select Tahsil----", "value": ""},
+        {"label": "हवेली", "value": "1"},
+        {"label": "खेड", "value": "5"},
+        {"label": "मुळशी", "value": "8"},
+    ]
+    match, usable = IGRFreeSearchScraper._pick_option_match("Khed", taluka_options)
+    assert match is not None
+    assert match.label == "खेड"
+    assert match.value == "5"
+    assert len(usable) == 3
+
+
+def test_pick_option_match_district_pune():
+    district_options = [
+        {"label": "--Select District--", "value": ""},
+        {"label": "पुणे(Pune)", "value": "21"},
+        {"label": "सातारा", "value": "22"},
+    ]
+    match, _ = IGRFreeSearchScraper._pick_option_match("Pune", district_options)
+    assert match is not None
+    assert "पुणे" in match.label
+
+
 def test_match_option_label_english_to_marathi_aliases():
     assert IGRFreeSearchScraper._match_option_label("मुळ्शी", "Mulshi") is True
     assert IGRFreeSearchScraper._match_option_label("वाकड", "Wakad") is True

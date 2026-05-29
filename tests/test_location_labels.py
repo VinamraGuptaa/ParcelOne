@@ -65,3 +65,11 @@ def test_fukeri_not_ker_village():
     match = best_option_match("Fukeri", options)
     assert match is not None
     assert match.label == "फुकेरी"
+
+
+def test_resolve_english_pune_khed_nighoje():
+    d, t, v, method = resolve_igr_labels("Pune", "Khed", "Nighoje")
+    assert method == "alias"
+    assert d == "पुणे"
+    assert t == "खेड"
+    assert v == "निघोजे"
