@@ -18,6 +18,7 @@ import re
 import shutil
 import sys
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -42,9 +43,10 @@ IGR_RESULTS_WAIT_SECONDS = float(os.getenv("IGR_RESULTS_WAIT_SECONDS", "45"))
 # Optional early skip when the page stays indeterminate. 0 = disabled (wait full results_wait).
 # Do not set this too low — IGR often needs 25–40s after a correct captcha before the grid appears.
 IGR_PENDING_STALL_SECONDS = float(os.getenv("IGR_PENDING_STALL_SECONDS", "0"))
-# After Search is clicked, if the page stays idle (no grid/zero/captcha change) this long,
-# reload the portal and retry the same year instead of waiting the full results_wait timeout.
-IGR_NO_RESPONSE_SECONDS = float(os.getenv("IGR_NO_RESPONSE_SECONDS", "10"))
+# After Search is clicked on the *first* captcha attempt, if the page stays idle this long,
+# reload the portal and retry. Keep below IGR_RESULTS_WAIT_SECONDS; phase-2 submits wait
+# the full results_wait (grid often needs 25–40s after a correct captcha).
+IGR_NO_RESPONSE_SECONDS = float(os.getenv("IGR_NO_RESPONSE_SECONDS", "25"))
 # How many portal refresh + refill attempts per year before skipping it as empty.
 IGR_PAGE_REFRESH_RETRIES = int(os.getenv("IGR_PAGE_REFRESH_RETRIES", str(MAX_CAPTCHA_RETRIES)))
 # After this many consecutive empty OCR reads, reload the portal and refill the form.
@@ -102,6 +104,49 @@ def _sanitize_label_input(value: str) -> str:
     txt = txt.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")
     txt = txt.replace("\ufffd", "").replace("?", "")
     return txt.strip()
+
+
+@dataclass
+class IGRYearSearchState:
+    """Mutable counters for one IGR year search."""
+
+    year: str
+    survey_number: str
+    phase2_attempts: int = 0
+    total_submits: int = 0
+    page_refresh_attempts: int = 0
+    empty_ocr_streak: int = 0
+    awaiting_phase2: bool = False
+
+    @property
+    def max_submits(self) -> int:
+        return max(MAX_CAPTCHA_RETRIES * 3, 10)
+
+    def can_submit(self) -> bool:
+        return self.phase2_attempts < MAX_CAPTCHA_RETRIES and self.total_submits < self.max_submits
+
+    def next_submit(self) -> int:
+        self.total_submits += 1
+        return self.total_submits
+
+    def mark_phase1(self) -> None:
+        self.awaiting_phase2 = True
+
+    def clear_phase2(self) -> None:
+        self.awaiting_phase2 = False
+
+    def mark_terminal_attempt(self) -> int:
+        self.phase2_attempts += 1
+        self.awaiting_phase2 = False
+        return self.phase2_attempts
+
+    def mark_page_refresh(self) -> int:
+        self.page_refresh_attempts += 1
+        self.awaiting_phase2 = False
+        return self.page_refresh_attempts
+
+    def page_refresh_exhausted(self) -> bool:
+        return self.page_refresh_attempts >= IGR_PAGE_REFRESH_RETRIES
 
 
 class IGRFreeSearchScraper:
@@ -741,6 +786,11 @@ class IGRFreeSearchScraper:
             pass
 
     @staticmethod
+    def _captcha_status_indicates_accepted(status_text: str) -> bool:
+        status = (status_text or "").strip().lower()
+        return "entered correct captcha" in status
+
+    @staticmethod
     def _submit_appears_unresponsive(
         *,
         elapsed_s: float,
@@ -748,8 +798,11 @@ class IGRFreeSearchScraper:
         captcha_fp_current: str,
         html: str,
         still_loading: bool,
+        status_text: str = "",
     ) -> bool:
         """True when Search was clicked but the portal stayed idle (needs page refresh)."""
+        if IGRFreeSearchScraper._captcha_status_indicates_accepted(status_text):
+            return False
         return (
             IGR_NO_RESPONSE_SECONDS > 0
             and elapsed_s >= IGR_NO_RESPONSE_SECONDS
@@ -764,6 +817,7 @@ class IGRFreeSearchScraper:
         captcha_fp_before: str,
         *,
         timeout_s: float | None = None,
+        phase2_submit: bool = False,
     ) -> tuple[str, str]:
         """
         Poll until the portal shows results, zero-results text, captcha rotation, or timeout.
@@ -798,18 +852,28 @@ class IGRFreeSearchScraper:
                 )
                 return outcome, last_html
             still_loading = await self._is_igr_page_loading()
-            if self._submit_appears_unresponsive(
-                elapsed_s=elapsed_s,
-                captcha_fp_before=captcha_fp_before,
-                captcha_fp_current=cur_fp,
-                html=last_html,
-                still_loading=still_loading,
+            if (
+                not phase2_submit
+                and self._submit_appears_unresponsive(
+                    elapsed_s=elapsed_s,
+                    captcha_fp_before=captcha_fp_before,
+                    captcha_fp_current=cur_fp,
+                    html=last_html,
+                    still_loading=still_loading,
+                    status_text=status_text,
+                )
             ):
                 logger.warning(
                     "IGR search had no response after %ds (captcha unchanged, no grid/zero) — needs page refresh.",
                     elapsed_s,
                 )
                 return "no_response", last_html
+            if phase2_submit and elapsed_s in (15, 30, 40):
+                logger.info(
+                    "IGR phase-2 search still waiting for grid/zero… %ds elapsed (up to %.0fs).",
+                    elapsed_s,
+                    wait_s,
+                )
             if (
                 IGR_PENDING_STALL_SECONDS > 0
                 and elapsed_s >= IGR_PENDING_STALL_SECONDS
@@ -834,7 +898,10 @@ class IGRFreeSearchScraper:
                     elapsed_s,
                     wait_s,
                 )
-            if elapsed_s in (10, 20, 30, 40) or (elapsed_s % 15 == 0 and elapsed_s <= int(wait_s)):
+            if (
+                not phase2_submit
+                and (elapsed_s in (10, 20, 30, 40) or (elapsed_s % 15 == 0 and elapsed_s <= int(wait_s)))
+            ):
                 logger.info(
                     "IGR still waiting for RegistrationGrid or zero-results text… %ds elapsed.",
                     elapsed_s,
@@ -1250,6 +1317,65 @@ class IGRFreeSearchScraper:
                 pass
             await asyncio.sleep(0.2)
 
+    async def _fill_survey_number(self, survey_number: str) -> None:
+        """Fill the survey/Gat number field and verify it stuck."""
+        assert self.page is not None
+        target = (survey_number or "").strip()
+        if not target:
+            return
+
+        async def _write() -> None:
+            try:
+                await self.page.fill(TXT_SURVEY, target)
+            except Exception:
+                await self.page.evaluate(
+                    """(v) => {
+                        const el = document.querySelector("input[name='txtAttributeValue1'], #txtAttributeValue1, input[name*='survey' i], input[id*='survey' i]");
+                        if (!el) return;
+                        el.value = '';
+                        el.dispatchEvent(new Event('input', {bubbles: true}));
+                        el.value = v;
+                        el.dispatchEvent(new Event('input', {bubbles: true}));
+                        el.dispatchEvent(new Event('change', {bubbles: true}));
+                    }""",
+                    target,
+                )
+                return
+            try:
+                await self.page.evaluate(
+                    """(v) => {
+                        const el = document.querySelector("input[name='txtAttributeValue1'], #txtAttributeValue1, input[name*='survey' i], input[id*='survey' i]");
+                        if (!el) return;
+                        if ((el.value || '').trim() !== v) {
+                            el.value = v;
+                        }
+                        el.dispatchEvent(new Event('input', {bubbles: true}));
+                        el.dispatchEvent(new Event('change', {bubbles: true}));
+                    }""",
+                    target,
+                )
+            except Exception:
+                pass
+
+        await _write()
+        await asyncio.sleep(0.15)
+        snap = await self._read_form_snapshot()
+        if (snap.get("survey") or "").strip() != target:
+            logger.info(
+                "IGR survey field drifted (wanted=%r got=%r); refilling.",
+                target,
+                snap.get("survey"),
+            )
+            await _write()
+            await asyncio.sleep(0.15)
+        final = await self._read_form_snapshot()
+        if (final.get("survey") or "").strip() != target:
+            logger.warning(
+                "IGR survey field did not stick after refill (wanted=%r got=%r).",
+                target,
+                final.get("survey"),
+            )
+
     async def _fill_search_form(
         self,
         district_label: str,
@@ -1303,22 +1429,7 @@ class IGRFreeSearchScraper:
                 await self._switch_to_rest_of_maharashtra_tab()
                 await asyncio.sleep(0.4)
 
-        # Property number / survey no.
-        try:
-            await self.page.fill(TXT_SURVEY, survey_number)
-        except Exception:
-            await self.page.evaluate(
-                """(v) => {
-                    const el = document.querySelector("input[name='txtAttributeValue1'], #txtAttributeValue1, input[name*='survey' i], input[id*='survey' i]");
-                    if (!el) return;
-                    el.value = '';
-                    el.dispatchEvent(new Event('input', {bubbles: true}));
-                    el.value = v;
-                    el.dispatchEvent(new Event('input', {bubbles: true}));
-                    el.dispatchEvent(new Event('change', {bubbles: true}));
-                }""",
-                survey_number,
-            )
+        await self._fill_survey_number(survey_number)
 
         # Always clear captcha field before solving/refilling.
         try:
@@ -1434,6 +1545,27 @@ class IGRFreeSearchScraper:
         year_ok = (snap.get("year", "").strip() == (year or "").strip())
         return district_ok and taluka_ok and village_ok and survey_ok and year_ok
 
+    async def _submit_search(self, submit_num: int) -> None:
+        """Click the IGR Search button, falling back to form submit."""
+        assert self.page is not None
+        for sel in (
+            BTN_SEARCH,
+            "button:has-text('Search')",
+            "input[type='submit']",
+            "button[type='submit']",
+            "text=Search",
+        ):
+            try:
+                btn = self.page.locator(sel).first
+                if await btn.count() > 0:
+                    await btn.click(timeout=2000)
+                    logger.info("IGR submit %s: clicked search via %s.", submit_num, sel)
+                    return
+            except Exception:
+                continue
+        await self.page.evaluate("document.querySelector('form')?.submit()")
+        logger.info("IGR submit %s: fallback form submit().", submit_num)
+
     @staticmethod
     def _extract_survey_refs(text: str) -> list[str]:
         """
@@ -1528,7 +1660,7 @@ class IGRFreeSearchScraper:
         if not grid:
             return []
 
-        rows = grid.find_all("tr")
+        rows = [tr for tr in grid.find_all("tr") if tr.find_parent("table") is grid]
         if len(rows) < 2:
             return []
 
@@ -1736,14 +1868,16 @@ class IGRFreeSearchScraper:
         assert self.page is not None
         logger.info(
             "IGR search start: district=%r taluka=%r village=%r survey=%r year=%r "
-            "(results_wait=%.0fs pending_stall=%.0fs)",
+            "(results_wait=%.0fs no_response=%.0fs pending_stall=%.0fs refresh_retries=%s)",
             district_label,
             taluka_label,
             village_label,
             survey_number,
             year,
             IGR_RESULTS_WAIT_SECONDS,
+            IGR_NO_RESPONSE_SECONDS,
             IGR_PENDING_STALL_SECONDS,
+            IGR_PAGE_REFRESH_RETRIES,
         )
         from api.location_labels import resolve_igr_labels
 
@@ -1810,11 +1944,7 @@ class IGRFreeSearchScraper:
             "IGR sequential fill complete: year -> district -> taluka -> village -> survey (single pass)."
         )
 
-        phase2_attempt = 0
-        total_submit = 0
-        page_refresh_attempts = 0
-        consecutive_empty_ocr = 0
-        max_submits = max(MAX_CAPTCHA_RETRIES * 3, 10)
+        state = IGRYearSearchState(year=year, survey_number=survey_number)
         form_retry_kwargs = {
             "district_label": district_label,
             "taluka_label": taluka_label,
@@ -1823,8 +1953,8 @@ class IGRFreeSearchScraper:
             "year": year,
         }
 
-        while phase2_attempt < MAX_CAPTCHA_RETRIES and total_submit < max_submits:
-            total_submit += 1
+        while state.can_submit():
+            submit_num = state.next_submit()
             # Ensure non-captcha fields are correctly set before every search attempt.
             current = await self._read_form_snapshot()
             if not self._snapshot_matches_expected(
@@ -1837,7 +1967,7 @@ class IGRFreeSearchScraper:
             ):
                 logger.info(
                     "IGR submit %s: form drift detected; refilling sequential fields. snapshot=%s",
-                    total_submit,
+                    submit_num,
                     current,
                 )
                 await self._fill_search_form(
@@ -1850,83 +1980,85 @@ class IGRFreeSearchScraper:
             fp_before = await self._get_captcha_src_fingerprint()
             solved = await self._solve_captcha()
             if not solved:
-                consecutive_empty_ocr += 1
+                state.empty_ocr_streak += 1
                 logger.info(
                     "IGR submit %s: empty OCR text (consecutive=%s).",
-                    total_submit,
-                    consecutive_empty_ocr,
+                    submit_num,
+                    state.empty_ocr_streak,
                 )
-                if consecutive_empty_ocr >= IGR_EMPTY_OCR_RECOVERY_THRESHOLD:
-                    consecutive_empty_ocr = 0
+                if state.empty_ocr_streak >= IGR_EMPTY_OCR_RECOVERY_THRESHOLD:
+                    state.empty_ocr_streak = 0
+                    state.clear_phase2()
                     await self._recover_search_page_after_stall(
                         **form_retry_kwargs,
                         reason=f"{IGR_EMPTY_OCR_RECOVERY_THRESHOLD} consecutive empty OCR reads",
                         previous_captcha_fp=fp_before,
                     )
                 continue
-            consecutive_empty_ocr = 0
+            state.empty_ocr_streak = 0
             filled_ok = await self._fill_captcha_field(solved)
             if not filled_ok:
                 logger.info(
                     "IGR submit %s: failed to fill %s with OCR text; retrying.",
-                    total_submit,
+                    submit_num,
                     TXT_CAPTCHA,
                 )
                 continue
             logger.info(
                 "IGR submit %s: filled captcha (len=%s).",
-                total_submit,
+                submit_num,
                 len(solved),
             )
-            clicked = False
-            for sel in (BTN_SEARCH, "button:has-text('Search')", "input[type='submit']", "button[type='submit']", "text=Search"):
-                try:
-                    btn = self.page.locator(sel).first
-                    if await btn.count() > 0:
-                        await btn.click(timeout=2000)
-                        logger.info("IGR submit %s: clicked search via %s.", total_submit, sel)
-                        clicked = True
-                        break
-                except Exception:
-                    continue
-            if not clicked:
-                await self.page.evaluate("document.querySelector('form')?.submit()")
-                logger.info("IGR submit %s: fallback form submit().", total_submit)
+            await self._submit_search(submit_num)
 
             await self._wait_for_postback_settle(timeout_s=12.0)
 
-            outcome, html = await self._wait_for_igr_search_outcome(fp_before)
+            outcome, html = await self._wait_for_igr_search_outcome(
+                fp_before,
+                phase2_submit=state.awaiting_phase2,
+            )
 
             if outcome == "phase1":
                 logger.info(
                     "IGR submit %s: captcha rotated after submit (Phase-1) — solving new captcha.",
-                    total_submit,
+                    submit_num,
                 )
+                state.mark_phase1()
                 await self._wait_for_captcha_image_ready(timeout_s=8.0)
                 continue
 
+            state.clear_phase2()
+
             if outcome in ("no_response", "timeout", "pending_stall", "captcha_stall"):
-                phase2_attempt += 1
-                consecutive_empty_ocr = 0
+                attempt = state.mark_terminal_attempt()
+                state.empty_ocr_streak = 0
                 self._save_raw_search_html(
                     html,
                     survey_number=survey_number,
                     year=year,
-                    attempt=phase2_attempt,
+                    attempt=attempt,
                 )
                 stall_reason = {
                     "no_response": f"search click had no effect within {IGR_NO_RESPONSE_SECONDS:.0f}s",
                     "pending_stall": f"no grid after {IGR_PENDING_STALL_SECONDS:.0f}s pending",
                     "captcha_stall": "captcha accepted but no grid",
                 }.get(outcome, f"RegistrationGrid not ready within {IGR_RESULTS_WAIT_SECONDS:.0f}s")
-                page_refresh_attempts += 1
-                if page_refresh_attempts >= IGR_PAGE_REFRESH_RETRIES:
+                refresh_attempt = state.mark_page_refresh()
+                logger.info(
+                    "IGR year=%r survey=%r: recoverable outcome=%s phase2_attempt=%s submit=%s.",
+                    year,
+                    survey_number,
+                    outcome,
+                    attempt,
+                    submit_num,
+                )
+                if state.page_refresh_exhausted():
                     logger.warning(
                         "IGR year=%r survey=%r: %s after %s page refresh attempts — skipping year.",
                         year,
                         survey_number,
                         stall_reason,
-                        page_refresh_attempts,
+                        refresh_attempt,
                     )
                     return await self._skip_year_as_empty(year, reason=stall_reason)
                 logger.warning(
@@ -1934,7 +2066,7 @@ class IGRFreeSearchScraper:
                     year,
                     survey_number,
                     stall_reason,
-                    page_refresh_attempts,
+                    refresh_attempt,
                     IGR_PAGE_REFRESH_RETRIES,
                 )
                 await self._recover_search_page_after_stall(
@@ -1947,7 +2079,7 @@ class IGRFreeSearchScraper:
             if outcome == "wrong_captcha":
                 logger.info(
                     "IGR submit %s: portal rejected captcha — refreshing image.",
-                    total_submit,
+                    submit_num,
                 )
                 await self._prepare_captcha_retry(
                     fp_before,
@@ -1957,12 +2089,12 @@ class IGRFreeSearchScraper:
                 continue
 
             if outcome == "zero":
-                phase2_attempt += 1
+                attempt = state.mark_terminal_attempt()
                 self._save_raw_search_html(
                     html,
                     survey_number=survey_number,
                     year=year,
-                    attempt=phase2_attempt,
+                    attempt=attempt,
                 )
                 return await self._skip_year_as_empty(
                     year,
@@ -1970,10 +2102,10 @@ class IGRFreeSearchScraper:
                 )
 
             if outcome != "grid":
-                phase2_attempt += 1
+                attempt = state.mark_terminal_attempt()
                 logger.warning(
                     "IGR phase-2 attempt %s/%s: unexpected outcome=%r; retrying.",
-                    phase2_attempt,
+                    attempt,
                     MAX_CAPTCHA_RETRIES,
                     outcome,
                 )
@@ -1984,12 +2116,12 @@ class IGRFreeSearchScraper:
                 )
                 continue
 
-            phase2_attempt += 1
+            attempt = state.mark_terminal_attempt()
             self._save_raw_search_html(
                 html,
                 survey_number=survey_number,
                 year=year,
-                attempt=phase2_attempt,
+                attempt=attempt,
             )
             # Portal shows this Marathi phrase when a year genuinely has no records.
             if self._html_indicates_zero_results(html):
@@ -2002,7 +2134,7 @@ class IGRFreeSearchScraper:
                 html,
                 survey_number=survey_number,
                 year=year,
-                attempt=phase2_attempt,
+                attempt=attempt,
             )
             if parsed:
                 meaningful = self._meaningful_result_rows(parsed)
@@ -2017,7 +2149,7 @@ class IGRFreeSearchScraper:
                     year,
                     len(parsed),
                     len(meaningful),
-                    phase2_attempt,
+                    attempt,
                 )
                 for row in meaningful:
                     row["search_year"] = year
@@ -2029,7 +2161,7 @@ class IGRFreeSearchScraper:
                 return meaningful
             logger.info(
                 "IGR phase-2 attempt %s/%s: no result rows parsed.",
-                phase2_attempt,
+                attempt,
                 MAX_CAPTCHA_RETRIES,
             )
             return await self._skip_year_as_empty(

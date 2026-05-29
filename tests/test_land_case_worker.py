@@ -11,7 +11,12 @@ from sqlalchemy import select
 
 from api.database import Base
 from api.models import EcourtsApiCall, EcourtsApiCase, EcourtsRankCache, LandCaseWorkflow, WorkflowCaseHit
-from api.land_case_worker import _contains_exact_survey_token
+from api.land_case_worker import (
+    _contains_exact_survey_token,
+    _extract_igr_party_row_for_target_survey,
+    _igr_dedupe_key,
+    parse_igr_hit_raw,
+)
 
 
 TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
@@ -76,6 +81,13 @@ def test_accepts_gat_kramank_label():
     assert _contains_exact_survey_token("पूर्वगामी करारानामा क्र.557/ 2019", "557") is False
 
 
+def test_accepts_gat_comma_separated_list():
+    assert _contains_exact_survey_token("गट नं 3952,3954,3927,3137/1 बाबत", "3954") is True
+    assert _contains_exact_survey_token("गट 3137/1,3927,3952,3954 बाबत", "3954") is True
+    assert _contains_exact_survey_token("गट नं 3952,39540,3927 बाबत", "3954") is False
+    assert _contains_exact_survey_token("मिळकती 3952,3954,3927 बाबत", "3954") is False
+
+
 def test_accepts_old_survey_number_with_label():
     text = "जुना सर्वे नंबर 70/2ब नवीन गट 576/ ब"
     assert _contains_exact_survey_token(text, "70/2") is False
@@ -125,9 +137,90 @@ def test_filters_full_target_survey_not_base_only():
     assert _contains_exact_survey_token("गट 204 only", target) is False
 
 
+def test_rejects_subsurvey_prefix_when_target_has_shorter_hissa():
+    assert _contains_exact_survey_token("मिळकत 1530/30", "1530/3") is False
+    assert _contains_exact_survey_token("मिळकत 2040", "204") is False
+
+
 def test_still_matches_gat_hissa_notation():
     text = "गट नंबर 1530 हिस्सा नंबर 3 जमीन"
     assert _contains_exact_survey_token(text, "1530/3") is True
+
+
+def test_extract_igr_party_row_requires_target_survey_and_parties():
+    row = {
+        "Property Description": "गट नंबर 1530 हिस्सा नंबर 3 जमीन",
+        "Seller Name": "Alice Seller",
+        "Purchaser Name": "Bob Buyer",
+    }
+    matched = _extract_igr_party_row_for_target_survey(row, "1530/3")
+    assert matched is not None
+    assert matched["seller_name"] == "Alice Seller"
+    assert matched["purchaser_name"] == "Bob Buyer"
+    assert matched["property_description"] == row["Property Description"]
+    assert matched["matched_target_survey"] == "1530/3"
+
+
+def test_extract_igr_party_row_rejects_wrong_hissa_or_missing_parties():
+    assert (
+        _extract_igr_party_row_for_target_survey(
+            {
+                "Property Description": "मिळकत 1530/30",
+                "Seller Name": "Alice Seller",
+            },
+            "1530/3",
+        )
+        is None
+    )
+    assert _extract_igr_party_row_for_target_survey({"Property Description": "1530/3"}, "1530/3") is None
+
+
+def test_extract_igr_party_row_accepts_alternate_column_keys():
+    matched = _extract_igr_party_row_for_target_survey(
+        {
+            "PropertyDescription": "204,हि.नं.6अ,क्षेत्र",
+            "SellerName": "Alice Seller",
+            "PurchaserName": "Bob Buyer",
+        },
+        "204/6A",
+    )
+    assert matched is not None
+    assert matched["seller_name"] == "Alice Seller"
+
+
+def test_igr_dedupe_key_collapses_parallel_slice_duplicates():
+    row1 = {
+        "search_year": "2025",
+        "matched_target_survey": "1530/3",
+        "seller_name": " Alice Seller ",
+        "purchaser_name": "Bob Buyer",
+        "property_description": "गट नंबर 1530 हिस्सा नंबर 3",
+    }
+    row2 = {
+        "search_year": "2025",
+        "survey_number": "1530/3",
+        "Seller Name": "Alice  Seller",
+        "Purchaser Name": "Bob Buyer",
+        "Property Description": "गट नंबर 1530 हिस्सा नंबर 3",
+    }
+    assert _igr_dedupe_key(row1) == _igr_dedupe_key(row2)
+
+
+def test_parse_igr_hit_raw_splits_braced_parties():
+    parsed = parse_igr_hit_raw(
+        {
+            "DocNo": "1001",
+            "DName": "खरेदीखत",
+            "RDate": "01/01/2025",
+            "SROName": "Haveli",
+            "Seller Name": "{Alice Seller}{Carol Seller}",
+            "Purchaser Name": "{Bob Buyer}",
+        }
+    )
+    assert parsed["doc_type"] == "Sale deed"
+    assert parsed["seller"] == "Alice Seller"
+    assert parsed["buyer"] == "Bob Buyer"
+    assert parsed["sellers"] == ["Alice Seller", "Carol Seller"]
 
 
 def _mock_bhulekh():

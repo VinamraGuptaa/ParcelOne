@@ -84,13 +84,13 @@ def _suffix_variants(part: str) -> set[str]:
     if not tok:
         return set()
     out = {tok}
-    m_latin = re.fullmatch(r"(.+?)([a-z])", tok, flags=re.IGNORECASE)
+    m_latin = re.fullmatch(r"(.*?)([a-z])", tok, flags=re.IGNORECASE)
     if m_latin:
         stem, suffix = m_latin.group(1), m_latin.group(2).lower()
         dev = _LATIN_TO_DEV_SUFFIX.get(suffix)
         if dev:
             out.add(f"{stem}{dev}")
-    m_dev = re.fullmatch(r"(.+?)([\u0900-\u097f])", tok)
+    m_dev = re.fullmatch(r"(.*?)([\u0900-\u097f])", tok)
     if m_dev:
         stem, suffix = m_dev.group(1), m_dev.group(2)
         latin = _DEV_TO_LATIN_SUFFIX.get(suffix)
@@ -134,6 +134,7 @@ _AREA_UNIT_TOKENS = frozenset([
 #   "गट क्रमांक 1530 हिस्सा क्रमांक 3"
 #   "ग.नं 970"                       (abbreviated Gat number — common in IGR lists)
 #   "गट न. 3954"                    (short Gat label — न. without anusvara)
+#   "गट नं 3952,3954,3927"          (Gat list where label appears only once)
 #   "28,हि.नं.1,क्षेत्र"            (comma + abbreviated Hissa label + area)
 #   "28/1 क्षेत्र"                  (slash notation followed by area word)
 _NUM_LABEL = r"(?:नंबर|नं\.?|न\.?|क्रमांक|क्र\.?|क्रं\.?|no\.?|num\.?|number)?"
@@ -297,6 +298,20 @@ def _contains_exact_survey_token(text: str, survey_token: str) -> bool:
         for m in gat_short_num.finditer(hay):
             tok_start = m.end() - len(tok)
             if _accept_igr_survey_match(hay, tok_start, m.end(), survey_token):
+                return True
+
+    # ── 1d. Gat label + comma-separated list: "गट नं 3952,3954,3927" ───────
+    # IGR Lis Pendency rows often list multiple Gat numbers after a single label.
+    # Treat a later bare item as labeled while keeping ordinary bare numbers rejected.
+    for tok in toks:
+        gat_list_num = re.compile(
+            rf"{_GAT_LABEL}\s*(?:[0-9]+(?:\s*/\s*[0-9a-z\u0900-\u097f]+)?\s*,\s*)+"
+            rf"{re.escape(tok)}(?![0-9a-z\u0900-\u097f])",
+            re.IGNORECASE | re.UNICODE,
+        )
+        for m in gat_list_num.finditer(hay):
+            _, after = _context_slice(hay, m.end() - len(tok), m.end())
+            if not _AREA_AFTER.match(after):
                 return True
 
     if "/" not in survey_token:
@@ -589,6 +604,13 @@ def _split_party_name_blob(value: str) -> list[str]:
     raw = (value or "").strip()
     if not raw:
         return []
+    braced = [
+        re.sub(r"\s+", " ", m.strip())
+        for m in re.findall(r"[\{\[]([^{}\[\]]+)[\}\]]", raw)
+        if m.strip()
+    ]
+    if braced:
+        return list(dict.fromkeys(braced))
     cleaned = re.sub(r"[{}\[\]\"]+", " ", raw)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return _split_owner_names(cleaned)
@@ -999,11 +1021,11 @@ async def run_land_case_workflow(workflow_id: str) -> None:
             IGR_PENDING_STALL_SECONDS,
             os.getenv("IGR_PARALLEL_CONTEXTS", "1"),
         )
-        # IGR portal search uses the plain base number (e.g. "1530"), never "1530/3" with a
-        # slash — the portal accepts only the Gat base.  It returns all documents whose
+        # IGR portal search uses the plain base number (e.g. "204" or "557"), never "204/6A"
+        # with a slash — the portal accepts only the Gat base.  It returns all documents whose
         # property descriptions mention that base survey in any format.  We then apply
         # _extract_igr_party_row_for_target_survey which uses _contains_exact_survey_token
-        # to filter for the exact sub-survey (e.g. "1530/3") across all text variations:
+        # to filter for the exact sub-survey (e.g. "204/6A") across all text variations:
         # slash notation, spaced-slash, Marathi Gat+Hissa label, English Gut+Hissa label, etc.
         base_survey = (wf.survey_part1 or "").strip()
         igr_search_survey = base_survey

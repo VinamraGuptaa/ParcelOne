@@ -73,3 +73,26 @@ def test_resolve_english_pune_khed_nighoje():
     assert d == "पुणे"
     assert t == "खेड"
     assert v == "निघोजे"
+
+
+def test_shirur_short_u_alias_matches_igr_dropdown():
+    options = [{"label": "जुन्नर", "value": "1"}, {"label": "शिरुर", "value": "8"}]
+    match = best_option_match("Shirur", options)
+    assert match is not None
+    assert match.label == "शिरुर"
+
+
+def test_resolve_english_pune_shirur_talegaon_dhamdhere():
+    d, t, v, method = resolve_igr_labels("Pune", "Shirur", "Talegaon Dhamdhere")
+    assert method == "alias"
+    assert d == "पुणे"
+    assert t == "शिरुर"
+    assert v == "तळेगांव ढमढेरे"
+
+
+def test_resolve_english_raigad_mangaon_khandad():
+    d, t, v, method = resolve_igr_labels("Raigad", "Mangaon", "Khandad")
+    assert method == "alias"
+    assert d == "रायगड"
+    assert t == "माणगाव"
+    assert v == "खांदाड"
