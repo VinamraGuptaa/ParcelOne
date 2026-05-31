@@ -12,6 +12,7 @@ dependencies = [
     "pandas>=3.0.1",
     "pillow>=12.1.1",
     "playwright>=1.58.0",
+    "bcrypt>=4.0",
     "python-dotenv>=1.2.2",
     "rapidocr-onnxruntime>=1.4.4",
     "sqlalchemy[asyncio]>=2.0.49",

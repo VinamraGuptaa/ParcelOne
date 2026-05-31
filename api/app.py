@@ -14,6 +14,7 @@ from api.models import SearchJob, LandCaseWorkflow
 from api.routes.jobs import router as jobs_router
 from api.routes.cases import router as cases_router
 from api.routes.workflows import router as workflows_router
+from api.auth import router as auth_router, purge_expired_sessions, ensure_admin_account
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +106,27 @@ def create_app() -> FastAPI:
                         logger.info("DB migration already applied: ecourts_api_calls.%s", col_name)
                     else:
                         logger.warning("DB migration skipped for ecourts_api_calls.%s: %s", col_name, exc)
+            auth_column_migrations = [
+                ("land_case_workflows", "user_id", "TEXT"),
+                ("search_jobs", "user_id", "TEXT"),
+                ("users", "is_admin", "BOOLEAN DEFAULT 0"),
+            ]
+            for table, col_name, col_type in auth_column_migrations:
+                try:
+                    await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}"))
+                    logger.info("Applied DB migration: %s.%s", table, col_name)
+                except Exception as exc:
+                    msg = str(exc).lower()
+                    if "duplicate column" in msg or "already exists" in msg:
+                        logger.info("DB migration already applied: %s.%s", table, col_name)
+                    else:
+                        logger.warning("DB migration skipped for %s.%s: %s", table, col_name, exc)
         logger.info("Database tables ready.")
+        async with AsyncSessionLocal() as db:
+            purged = await purge_expired_sessions(db)
+            if purged:
+                logger.info("Purged %s expired auth session(s).", purged)
+            await ensure_admin_account(db)
         await _recover_orphaned_jobs()
 
     async def _recover_orphaned_jobs():
@@ -211,6 +232,7 @@ def create_app() -> FastAPI:
         return {"status": "ok", "schema": "up_to_date"}
 
     # API routers
+    app.include_router(auth_router, prefix="/api")
     app.include_router(jobs_router, prefix="/api")
     app.include_router(cases_router, prefix="/api")
     app.include_router(workflows_router, prefix="/api")

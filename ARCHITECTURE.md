@@ -1,6 +1,6 @@
 # icy-disk — Living Architecture Doc
 
-> Last updated: 2026-05-26 (React SPA; multi-stage Docker; AWS deployment)
+> Last updated: 2026-05-29 (auth: users, server-side sessions, per-user workflows)
 > Update this file whenever a decision is made, a component changes, or a known issue is resolved.
 
 ---
@@ -49,6 +49,11 @@ FastAPI  (uvicorn, server.py, port 8000)
     ├── GET  /api/workflows/{id}/artifact/{pdf|csv|html}
     ├── POST /api/jobs                → eCourts name search job (202)
     ├── GET  /api/jobs / {id} / cases / export
+    ├── POST /api/auth/register     → sign up + session cookie
+    ├── POST /api/auth/login        → login + session cookie
+    ├── POST /api/auth/logout       → revoke session (DELETE row)
+    ├── GET  /api/auth/me           → current user
+    ├── GET  /api/auth/config       → { auth_enabled, allow_register }
     └── SPA catch-all                 → index.html for React Router deep links
 
 Background workers
@@ -100,6 +105,62 @@ uv run python server.py
 # Terminal 2 — Vite dev server (proxies /api → :8000)
 cd frontend && npm run dev
 ```
+
+---
+
+## Authentication and sessions
+
+Optional gate for pilot users. Off by default locally (`AUTH_ENABLED=0`); enable on staging/prod.
+
+### Data model
+
+| Table | Purpose |
+|-------|---------|
+| `users` | `email` (unique), `password_hash` (bcrypt), `is_admin` |
+| `sessions` | Server-side sessions: `token_hash` (SHA-256, **unique index**), `user_id`, `expires_at` |
+| `land_case_workflows.user_id` | Workflow ownership |
+| `search_jobs.user_id` | eCourts job ownership |
+
+Pre-auth rows with `user_id=NULL` are invisible once auth is enabled.
+
+### Session lifecycle
+
+1. **Register / login** → `secrets.token_urlsafe(32)` raw token → HttpOnly cookie `session_token`
+2. **DB stores** only `SHA-256(raw_token)` in `sessions.token_hash` (indexed unique lookup)
+3. **Each request** → hash cookie → lookup session → reject if missing or `expires_at <= now`
+4. **Logout** → `DELETE FROM sessions WHERE token_hash = ?` + clear cookie (immediate revocation)
+5. **Startup** → purge expired session rows
+
+No JWT, no Starlette signed-cookie sessions — tokens are revocable and indexed in the DB.
+
+### API protection
+
+When `AUTH_ENABLED=1`, all `/api/*` routes except `/api/health`, `/api/health/db`, and `/api/auth/*` require a valid session.
+
+Workflow and job list/get/create queries filter by `sessions.user_id → users.id`.
+
+The active-workflow concurrency guard is **per user** (User A running does not block User B).
+
+### Frontend
+
+| Route | Page |
+|-------|------|
+| `/signup` | First-time registration |
+| `/login` | Returning users |
+
+`AuthContext` calls `/api/auth/me` on load; redirects to `/login` when auth is enabled and unauthenticated. All `fetch` calls use `credentials: 'include'`.
+
+### Environment
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `AUTH_ENABLED` | `0` | Set `1` on staging/prod |
+| `AUTH_ALLOW_REGISTER` | `1` | Set `0` to close public sign-up |
+| `AUTH_SESSION_MAX_AGE` | `604800` | Session TTL in seconds (7 days) |
+| `AUTH_ADMIN_EMAIL` | unset | Bootstrap admin account on startup (with `AUTH_ADMIN_PASSWORD`) |
+| `AUTH_ADMIN_PASSWORD` | unset | Admin password (min 8 chars); synced on startup if changed in env |
+
+On startup, if `AUTH_ADMIN_EMAIL` and `AUTH_ADMIN_PASSWORD` are set, the server creates that user as admin (or promotes/updates an existing account).
 
 ---
 

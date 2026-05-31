@@ -8,7 +8,8 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.database import get_db
-from api.models import SearchJob
+from api.models import SearchJob, User
+from api.auth import auth_enabled, get_current_user
 from api.schemas import JobCreateRequest, JobResponse, JobListResponse
 from api.worker import run_scrape_job
 
@@ -20,11 +21,13 @@ logger = logging.getLogger(__name__)
 async def create_job(
     body: JobCreateRequest,
     db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_current_user),
 ):
     """Submit a new scrape job. Returns 202 immediately; scraping runs in background."""
     job = SearchJob(
         petitioner_name=body.petitioner_name,
         year=body.year,
+        user_id=current_user.id if current_user else None,
     )
     db.add(job)
     await db.commit()
@@ -38,9 +41,16 @@ async def create_job(
 
 
 @router.get("/{job_id}", response_model=JobResponse)
-async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
+async def get_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_current_user),
+):
     """Poll a job's status and progress."""
-    result = await db.execute(select(SearchJob).where(SearchJob.id == job_id))
+    query = select(SearchJob).where(SearchJob.id == job_id)
+    if auth_enabled() and current_user is not None:
+        query = query.where(SearchJob.user_id == current_user.id)
+    result = await db.execute(query)
     job = result.scalar_one_or_none()
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found.")
@@ -52,16 +62,20 @@ async def list_jobs(
     limit: int = 20,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_current_user),
 ):
     """List all past jobs, newest first."""
-    count_result = await db.execute(select(func.count()).select_from(SearchJob))
+    base_filter = select(SearchJob)
+    count_filter = select(func.count()).select_from(SearchJob)
+    if auth_enabled() and current_user is not None:
+        base_filter = base_filter.where(SearchJob.user_id == current_user.id)
+        count_filter = count_filter.where(SearchJob.user_id == current_user.id)
+
+    count_result = await db.execute(count_filter)
     total = count_result.scalar_one()
 
     result = await db.execute(
-        select(SearchJob)
-        .order_by(SearchJob.created_at.desc())
-        .limit(limit)
-        .offset(offset)
+        base_filter.order_by(SearchJob.created_at.desc()).limit(limit).offset(offset)
     )
     jobs = result.scalars().all()
 

@@ -3,7 +3,7 @@ export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ??
 // ── Generic helpers ──────────────────────────────────────────────────────────
 
 export async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`);
+  const res = await fetch(`${API_BASE}${path}`, { credentials: 'include' });
   if (!res.ok) {
     const data = await res.json().catch(() => ({})) as { detail?: string };
     throw new Error(data.detail ?? `HTTP ${res.status}`);
@@ -15,6 +15,7 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
     body: JSON.stringify(body),
   });
   if (!res.ok) {

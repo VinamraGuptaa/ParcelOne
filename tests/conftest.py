@@ -10,6 +10,7 @@ import os
 # Must be set before any app module is imported so database.py
 # picks up the test URL at module-load time.
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
+os.environ.setdefault("AUTH_ENABLED", "0")
 
 import pytest
 import pytest_asyncio

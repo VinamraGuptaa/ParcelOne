@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.database import get_db
+from api.auth import auth_enabled, get_current_user
 from api.land_case_worker import (
     _is_plausible_ecourts_name,
     _split_party_name_blob,
@@ -27,6 +28,7 @@ from api.models import (
     LandCaseWorkflow,
     LandEntity,
     NameVariant,
+    User,
     WorkflowCaseHit,
     WorkflowIgrHit,
 )
@@ -325,21 +327,41 @@ def _resolve_artifact_path(workflow_id: str, kind: str, wf: LandCaseWorkflow) ->
     return None
 
 
+async def _get_workflow_for_user(
+    workflow_id: str,
+    db: AsyncSession,
+    current_user: User | None,
+) -> LandCaseWorkflow:
+    query = select(LandCaseWorkflow).where(LandCaseWorkflow.id == workflow_id)
+    if auth_enabled() and current_user is not None:
+        query = query.where(LandCaseWorkflow.user_id == current_user.id)
+    result = await db.execute(query)
+    wf = result.scalar_one_or_none()
+    if wf is None:
+        raise HTTPException(status_code=404, detail="Workflow not found.")
+    return wf
+
+
 @router.get("", response_model=WorkflowListResponse)
 async def list_land_case_workflows(
     limit: int = 20,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_current_user),
 ):
     from sqlalchemy import func
-    count_result = await db.execute(select(func.count()).select_from(LandCaseWorkflow))
+
+    base = select(LandCaseWorkflow)
+    count_q = select(func.count()).select_from(LandCaseWorkflow)
+    if auth_enabled() and current_user is not None:
+        base = base.where(LandCaseWorkflow.user_id == current_user.id)
+        count_q = count_q.where(LandCaseWorkflow.user_id == current_user.id)
+
+    count_result = await db.execute(count_q)
     total = count_result.scalar_one()
 
     result = await db.execute(
-        select(LandCaseWorkflow)
-        .order_by(LandCaseWorkflow.created_at.desc())
-        .limit(limit)
-        .offset(offset)
+        base.order_by(LandCaseWorkflow.created_at.desc()).limit(limit).offset(offset)
     )
     workflows = result.scalars().all()
     return WorkflowListResponse(
@@ -367,6 +389,7 @@ async def list_land_case_workflows(
 async def create_land_case_workflow(
     body: LandCaseWorkflowCreateRequest,
     db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_current_user),
 ):
     logger.info(
         "Create land workflow request: district=%r taluka=%r village=%r survey=%r/%r owner=%r idem=%r",
@@ -379,17 +402,19 @@ async def create_land_case_workflow(
         body.idempotency_key,
     )
     if body.idempotency_key:
-        existing = await db.execute(
-            select(LandCaseWorkflow).where(LandCaseWorkflow.idempotency_key == body.idempotency_key)
-        )
+        idem_q = select(LandCaseWorkflow).where(LandCaseWorkflow.idempotency_key == body.idempotency_key)
+        if auth_enabled() and current_user is not None:
+            idem_q = idem_q.where(LandCaseWorkflow.user_id == current_user.id)
+        existing = await db.execute(idem_q)
         found = existing.scalar_one_or_none()
         if found is not None:
             logger.info("Idempotent land workflow hit: workflow_id=%s", found.id)
             return _workflow_to_response(found)
 
-    active = await db.execute(
-        select(LandCaseWorkflow.id).where(LandCaseWorkflow.status.in_(ACTIVE_WORKFLOW_STATUSES)).limit(1)
-    )
+    active_q = select(LandCaseWorkflow.id).where(LandCaseWorkflow.status.in_(ACTIVE_WORKFLOW_STATUSES))
+    if auth_enabled() and current_user is not None:
+        active_q = active_q.where(LandCaseWorkflow.user_id == current_user.id)
+    active = await db.execute(active_q.limit(1))
     active_workflow_id = active.scalar_one_or_none()
     if active_workflow_id is not None:
         logger.info(
@@ -405,6 +430,7 @@ async def create_land_case_workflow(
         )
 
     wf = LandCaseWorkflow(
+        user_id=current_user.id if current_user else None,
         district_label=body.district_label,
         taluka_label=body.taluka_label,
         village_label=body.village_label,
@@ -428,12 +454,9 @@ async def create_land_case_workflow(
 async def get_land_case_workflow(
     workflow_id: str,
     db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_current_user),
 ):
-    result = await db.execute(select(LandCaseWorkflow).where(LandCaseWorkflow.id == workflow_id))
-    wf = result.scalar_one_or_none()
-    if wf is None:
-        logger.warning("Workflow status requested but not found: workflow_id=%s", workflow_id)
-        raise HTTPException(status_code=404, detail="Workflow not found.")
+    wf = await _get_workflow_for_user(workflow_id, db, current_user)
     logger.info("Workflow status fetched: workflow_id=%s status=%s", workflow_id, wf.status)
     return _workflow_to_response(wf)
 
@@ -442,12 +465,9 @@ async def get_land_case_workflow(
 async def cancel_land_case_workflow(
     workflow_id: str,
     db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_current_user),
 ):
-    result = await db.execute(select(LandCaseWorkflow).where(LandCaseWorkflow.id == workflow_id))
-    wf = result.scalar_one_or_none()
-    if wf is None:
-        logger.warning("Workflow cancel requested but not found: workflow_id=%s", workflow_id)
-        raise HTTPException(status_code=404, detail="Workflow not found.")
+    wf = await _get_workflow_for_user(workflow_id, db, current_user)
     if wf.status not in ACTIVE_WORKFLOW_STATUSES:
         raise HTTPException(
             status_code=400,
@@ -470,12 +490,9 @@ async def cancel_land_case_workflow(
 async def get_land_case_workflow_results(
     workflow_id: str,
     db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_current_user),
 ):
-    wf_result = await db.execute(select(LandCaseWorkflow).where(LandCaseWorkflow.id == workflow_id))
-    wf = wf_result.scalar_one_or_none()
-    if wf is None:
-        logger.warning("Workflow results requested but not found: workflow_id=%s", workflow_id)
-        raise HTTPException(status_code=404, detail="Workflow not found.")
+    wf = await _get_workflow_for_user(workflow_id, db, current_user)
 
     ent_result = await db.execute(
         select(LandEntity)
@@ -662,12 +679,9 @@ async def get_land_case_workflow_results(
 async def get_land_case_workflow_artifacts(
     workflow_id: str,
     db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_current_user),
 ):
-    result = await db.execute(select(LandCaseWorkflow).where(LandCaseWorkflow.id == workflow_id))
-    wf = result.scalar_one_or_none()
-    if wf is None:
-        logger.warning("Workflow artifacts requested but not found: workflow_id=%s", workflow_id)
-        raise HTTPException(status_code=404, detail="Workflow not found.")
+    wf = await _get_workflow_for_user(workflow_id, db, current_user)
     logger.info(
         "Workflow artifacts fetched: workflow_id=%s has_pdf=%s has_html=%s",
         workflow_id,
@@ -687,6 +701,7 @@ async def stream_land_case_workflow_artifact(
     workflow_id: str,
     kind: str,
     db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_current_user),
 ):
     """Stream a workflow artifact (pdf | csv | html) by id.
 
@@ -701,10 +716,7 @@ async def stream_land_case_workflow_artifact(
             detail=f"Unsupported artifact kind {kind!r}. Allowed: pdf, csv, html.",
         )
 
-    result = await db.execute(select(LandCaseWorkflow).where(LandCaseWorkflow.id == workflow_id))
-    wf = result.scalar_one_or_none()
-    if wf is None:
-        raise HTTPException(status_code=404, detail="Workflow not found.")
+    wf = await _get_workflow_for_user(workflow_id, db, current_user)
 
     path = _resolve_artifact_path(workflow_id, kind_norm, wf)
     if path is None:

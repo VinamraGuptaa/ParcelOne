@@ -98,6 +98,18 @@ a:hover { text-decoration: underline; }
   color: var(--ghost);
   letter-spacing: 0.06em;
   text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.masthead__admin-badge {
+  margin-left: 8px;
+  padding: 2px 6px;
+  border: 1px solid var(--brass);
+  color: var(--ink);
+  font-size: 9px;
+  letter-spacing: 0.1em;
 }
 
 /* ── Navbar ────────────────────────────────────────────────────────────────── */
@@ -860,4 +872,98 @@ input:disabled, select:disabled, textarea:disabled {
 @keyframes pulse-opacity {
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.4; }
+}
+
+/* ── Auth pages ────────────────────────────────────────────────────────────── */
+.auth-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--newsprint);
+}
+
+.auth-page__status {
+  font-family: var(--f-mono);
+  color: var(--ghost);
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 420px;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  padding: 28px 24px 24px;
+}
+
+.auth-card__brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.auth-card__title {
+  font-family: var(--f-display);
+  font-size: 22px;
+  line-height: 1;
+  color: var(--ink);
+}
+
+.auth-card__subtitle {
+  font-family: var(--f-prose);
+  font-size: 12px;
+  font-style: italic;
+  color: var(--ghost);
+  margin-top: 4px;
+}
+
+.auth-card__heading {
+  font-family: var(--f-display);
+  font-size: 28px;
+  margin-bottom: 6px;
+}
+
+.auth-card__hint {
+  font-family: var(--f-prose);
+  font-size: 14px;
+  color: var(--ghost);
+  margin-bottom: 18px;
+}
+
+.auth-card__footer {
+  margin-top: 18px;
+  font-size: 11px;
+  color: var(--ghost);
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.auth-form__label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ghost);
+}
+
+.auth-form__label input {
+  font-family: var(--f-mono);
+  font-size: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  background: var(--newsprint);
+  color: var(--ink);
+}
+
+.auth-form__submit {
+  margin-top: 4px;
+  width: 100%;
 }

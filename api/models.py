@@ -17,10 +17,45 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-class SearchJob(Base):
-    __tablename__ = "search_jobs"
+class User(Base):
+    __tablename__ = "users"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    email: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    sessions: Mapped[list["AuthSession"]] = relationship(
+        "AuthSession",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+
+class AuthSession(Base):
+    __tablename__ = "sessions"
+    __table_args__ = (
+        Index("ix_sessions_token_hash", "token_hash", unique=True),
+        Index("ix_sessions_user_id", "user_id"),
+        Index("ix_sessions_expires_at", "expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    user: Mapped["User"] = relationship("User", back_populates="sessions")
+
+
+class SearchJob(Base):
+    __tablename__ = "search_jobs"
+    __table_args__ = (Index("ix_search_jobs_user_id", "user_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"), nullable=True)
     petitioner_name: Mapped[str] = mapped_column(Text, nullable=False)
     year: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending/running/done/failed
@@ -79,10 +114,14 @@ class Case(Base):
 
 class LandCaseWorkflow(Base):
     __tablename__ = "land_case_workflows"
-    __table_args__ = (Index("ix_land_case_workflows_status", "status"),)
+    __table_args__ = (
+        Index("ix_land_case_workflows_status", "status"),
+        Index("ix_land_case_workflows_user_id", "user_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
+    user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     district_label: Mapped[str] = mapped_column(Text, nullable=False)
     taluka_label: Mapped[str] = mapped_column(Text, nullable=False)

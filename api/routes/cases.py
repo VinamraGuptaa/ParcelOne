@@ -9,12 +9,24 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.auth import auth_enabled, get_current_user
 from api.database import get_db
-from api.models import SearchJob, Case
+from api.models import SearchJob, Case, User
 from api.schemas import CaseResponse, CasesListResponse
 
 router = APIRouter(tags=["cases"])
 logger = logging.getLogger(__name__)
+
+
+async def _get_job_for_user(job_id: str, db: AsyncSession, current_user: User | None) -> SearchJob:
+    query = select(SearchJob).where(SearchJob.id == job_id)
+    if auth_enabled() and current_user is not None:
+        query = query.where(SearchJob.user_id == current_user.id)
+    result = await db.execute(query)
+    job = result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return job
 
 
 @router.get("/jobs/{job_id}/cases", response_model=CasesListResponse)
@@ -23,12 +35,10 @@ async def list_cases(
     limit: int = 200,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_current_user),
 ):
     """Return all cases for a given job (paginated)."""
-    # Verify job exists
-    job_result = await db.execute(select(SearchJob).where(SearchJob.id == job_id))
-    if job_result.scalar_one_or_none() is None:
-        raise HTTPException(status_code=404, detail="Job not found.")
+    await _get_job_for_user(job_id, db, current_user)
 
     count_result = await db.execute(
         select(func.count()).select_from(Case).where(Case.job_id == job_id)
@@ -52,12 +62,13 @@ async def list_cases(
 
 
 @router.get("/jobs/{job_id}/cases/export")
-async def export_cases(job_id: str, db: AsyncSession = Depends(get_db)):
+async def export_cases(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_current_user),
+):
     """Stream all cases for a job as a CSV download."""
-    job_result = await db.execute(select(SearchJob).where(SearchJob.id == job_id))
-    job = job_result.scalar_one_or_none()
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found.")
+    await _get_job_for_user(job_id, db, current_user)
 
     result = await db.execute(
         select(Case).where(Case.job_id == job_id).order_by(Case.id)

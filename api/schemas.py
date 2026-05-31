@@ -360,3 +360,38 @@ class WorkflowSummaryResponse(BaseModel):
 class WorkflowListResponse(BaseModel):
     workflows: list[WorkflowSummaryResponse]
     total: int
+
+
+# ---------- Auth ----------
+
+class AuthCredentialsRequest(BaseModel):
+    email: str
+    password: str
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email_field(cls, v: str) -> str:
+        return (v or "").strip().lower()
+
+    @field_validator("password")
+    @classmethod
+    def password_min_length(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters.")
+        return v
+
+
+class AuthRegisterRequest(AuthCredentialsRequest):
+    pass
+
+
+class AuthUserResponse(BaseModel):
+    user_id: str
+    email: str
+    auth_enabled: bool
+    is_admin: bool = False
+
+
+class AuthConfigResponse(BaseModel):
+    auth_enabled: bool
+    allow_register: bool
