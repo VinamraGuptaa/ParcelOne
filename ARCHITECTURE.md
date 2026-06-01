@@ -125,9 +125,9 @@ Pre-auth rows with `user_id=NULL` are invisible once auth is enabled.
 
 ### Session lifecycle
 
-1. **Register / login** → `secrets.token_urlsafe(32)` raw token → HttpOnly cookie `session_token`
+1. **Register / login** → `secrets.token_urlsafe(32)` raw token → HttpOnly cookie `session_token` **and** `session_token` in JSON (stored in `sessionStorage` by the SPA)
 2. **DB stores** only `SHA-256(raw_token)` in `sessions.token_hash` (indexed unique lookup)
-3. **Each request** → hash cookie → lookup session → reject if missing or `expires_at <= now`
+3. **Each request** → session from cookie **or** `Authorization: Bearer <token>` → reject if missing or expired
 4. **Logout** → `DELETE FROM sessions WHERE token_hash = ?` + clear cookie (immediate revocation)
 5. **Startup** → purge expired session rows
 

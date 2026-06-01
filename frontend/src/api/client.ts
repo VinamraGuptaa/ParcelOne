@@ -1,9 +1,36 @@
 export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? '/api';
 
+const SESSION_TOKEN_KEY = 'plotwise_session_token';
+
+export function getSessionToken(): string | null {
+  try {
+    return sessionStorage.getItem(SESSION_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setSessionToken(token: string | null): void {
+  try {
+    if (token) sessionStorage.setItem(SESSION_TOKEN_KEY, token);
+    else sessionStorage.removeItem(SESSION_TOKEN_KEY);
+  } catch {
+    /* private browsing */
+  }
+}
+
+function authHeaders(): Record<string, string> {
+  const token = getSessionToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 // ── Generic helpers ──────────────────────────────────────────────────────────
 
 export async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, { credentials: 'include' });
+  const res = await fetch(`${API_BASE}${path}`, {
+    credentials: 'include',
+    headers: authHeaders(),
+  });
   if (!res.ok) {
     const data = await res.json().catch(() => ({})) as { detail?: string };
     throw new Error(data.detail ?? `HTTP ${res.status}`);
@@ -14,7 +41,7 @@ export async function apiGet<T>(path: string): Promise<T> {
 export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     credentials: 'include',
     body: JSON.stringify(body),
   });

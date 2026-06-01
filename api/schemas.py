@@ -390,6 +390,7 @@ class AuthUserResponse(BaseModel):
     email: str
     auth_enabled: bool
     is_admin: bool = False
+    session_token: str | None = None
 
 
 class AuthConfigResponse(BaseModel):

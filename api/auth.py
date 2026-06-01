@@ -50,8 +50,28 @@ def session_max_age_seconds() -> int:
         return 604800
 
 
-def cookie_secure() -> bool:
-    return os.getenv("AUTH_COOKIE_SECURE", "0").strip().lower() in {"1", "true", "yes", "on"}
+def cookie_secure(request: Request | None = None) -> bool:
+    """Secure cookies when AUTH_COOKIE_SECURE=1 or ALB terminates HTTPS (X-Forwarded-Proto)."""
+    raw = os.getenv("AUTH_COOKIE_SECURE")
+    if raw is not None and raw.strip() != "":
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    if request is not None:
+        forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+        if forwarded == "https":
+            return True
+    return False
+
+
+def bearer_token_from_request(request: Request) -> str | None:
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+        return token or None
+    return None
+
+
+def session_token_from_request(request: Request) -> str | None:
+    return request.cookies.get(SESSION_COOKIE) or bearer_token_from_request(request)
 
 
 def _utc_now() -> datetime:
@@ -108,29 +128,29 @@ async def revoke_session(db: AsyncSession, raw_token: str | None) -> None:
     await db.commit()
 
 
-def set_session_cookie(response: Response, raw_token: str) -> None:
+def set_session_cookie(response: Response, raw_token: str, request: Request | None = None) -> None:
     response.set_cookie(
         key=SESSION_COOKIE,
         value=raw_token,
         httponly=True,
-        secure=cookie_secure(),
+        secure=cookie_secure(request),
         samesite="lax",
         max_age=session_max_age_seconds(),
         path="/",
     )
 
 
-def clear_session_cookie(response: Response) -> None:
+def clear_session_cookie(response: Response, request: Request | None = None) -> None:
     response.delete_cookie(
         key=SESSION_COOKIE,
         path="/",
-        secure=cookie_secure(),
+        secure=cookie_secure(request),
         samesite="lax",
     )
 
 
 async def resolve_user_from_request(request: Request, db: AsyncSession) -> User | None:
-    raw_token = request.cookies.get(SESSION_COOKIE)
+    raw_token = session_token_from_request(request)
     if not raw_token:
         return None
 
@@ -175,12 +195,18 @@ async def get_current_admin(
     return current_user
 
 
-def user_response(user: User, *, auth_enabled_flag: bool = True) -> AuthUserResponse:
+def user_response(
+    user: User,
+    *,
+    auth_enabled_flag: bool = True,
+    session_token: str | None = None,
+) -> AuthUserResponse:
     return AuthUserResponse(
         user_id=user.id,
         email=user.email,
         auth_enabled=auth_enabled_flag,
         is_admin=bool(user.is_admin),
+        session_token=session_token,
     )
 
 
@@ -228,6 +254,7 @@ async def auth_config():
 @router.post("/register", response_model=AuthUserResponse)
 async def register(
     body: AuthRegisterRequest,
+    request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
@@ -250,14 +277,15 @@ async def register(
     await db.refresh(user)
 
     raw_token = await create_session(db, user.id)
-    set_session_cookie(response, raw_token)
+    set_session_cookie(response, raw_token, request)
     logger.info("Registered user: user_id=%s email=%s", user.id, user.email)
-    return user_response(user)
+    return user_response(user, session_token=raw_token)
 
 
 @router.post("/login", response_model=AuthUserResponse)
 async def login(
     body: AuthCredentialsRequest,
+    request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
@@ -271,8 +299,8 @@ async def login(
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
     raw_token = await create_session(db, user.id)
-    set_session_cookie(response, raw_token)
-    return user_response(user)
+    set_session_cookie(response, raw_token, request)
+    return user_response(user, session_token=raw_token)
 
 
 @router.post("/logout")
@@ -282,8 +310,8 @@ async def logout(
     db: AsyncSession = Depends(get_db),
 ):
     if auth_enabled():
-        await revoke_session(db, request.cookies.get(SESSION_COOKIE))
-    clear_session_cookie(response)
+        await revoke_session(db, session_token_from_request(request))
+    clear_session_cookie(response, request)
     return {"ok": True}
 
 

@@ -146,6 +146,7 @@ class TestAuthRegistration:
         body = await _register(auth_client, "alice@example.com")
         assert body["email"] == "alice@example.com"
         assert "user_id" in body
+        assert body.get("session_token")
 
         me = await auth_client.get("/api/auth/me")
         assert me.status_code == 200
@@ -209,6 +210,23 @@ class TestAuthSessions:
     async def test_protected_route_requires_session(self, auth_client: AsyncClient):
         resp = await auth_client.get("/api/workflows")
         assert resp.status_code == 401
+
+    async def test_bearer_token_authenticates_without_cookie(self, auth_client: AsyncClient):
+        reg = await auth_client.post(
+            "/api/auth/register",
+            json={"email": "bearer@example.com", "password": "secret123"},
+        )
+        assert reg.status_code == 200
+        token = reg.json().get("session_token")
+        assert token
+
+        bare = AsyncClient(
+            transport=auth_client._transport,
+            base_url=auth_client.base_url,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        resp = await bare.get("/api/workflows")
+        assert resp.status_code == 200
 
     async def test_health_public_without_session(self, auth_client: AsyncClient):
         resp = await auth_client.get("/api/health")
