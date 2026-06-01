@@ -2,20 +2,41 @@ export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ??
 
 const SESSION_TOKEN_KEY = 'plotwise_session_token';
 
-export function getSessionToken(): string | null {
+function readStoredToken(): string | null {
   try {
-    return sessionStorage.getItem(SESSION_TOKEN_KEY);
+    return (
+      localStorage.getItem(SESSION_TOKEN_KEY) ??
+      sessionStorage.getItem(SESSION_TOKEN_KEY)
+    );
   } catch {
     return null;
   }
 }
 
+export function getSessionToken(): string | null {
+  return readStoredToken();
+}
+
 export function setSessionToken(token: string | null): void {
   try {
-    if (token) sessionStorage.setItem(SESSION_TOKEN_KEY, token);
-    else sessionStorage.removeItem(SESSION_TOKEN_KEY);
+    if (token) {
+      localStorage.setItem(SESSION_TOKEN_KEY, token);
+      sessionStorage.setItem(SESSION_TOKEN_KEY, token);
+    } else {
+      localStorage.removeItem(SESSION_TOKEN_KEY);
+      sessionStorage.removeItem(SESSION_TOKEN_KEY);
+    }
   } catch {
     /* private browsing */
+  }
+}
+
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
   }
 }
 
@@ -33,7 +54,7 @@ export async function apiGet<T>(path: string): Promise<T> {
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({})) as { detail?: string };
-    throw new Error(data.detail ?? `HTTP ${res.status}`);
+    throw new ApiError(data.detail ?? `HTTP ${res.status}`, res.status);
   }
   return res.json() as Promise<T>;
 }

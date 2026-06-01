@@ -169,6 +169,10 @@ async def resolve_user_from_request(request: Request, db: AsyncSession) -> User 
         await db.execute(delete(AuthSession).where(AuthSession.id == session_row.id))
         await db.commit()
         return None
+
+    # Sliding expiry — keep active sessions alive across page refreshes.
+    session_row.expires_at = now + timedelta(seconds=session_max_age_seconds())
+    await db.commit()
     return user
 
 

@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { apiGet, apiPost, setSessionToken } from '../api/client';
+import { ApiError, apiGet, apiPost, getSessionToken, setSessionToken } from '../api/client';
 
 export interface AuthUser {
   user_id: string;
@@ -8,12 +8,7 @@ export interface AuthUser {
   session_token?: string | null;
 }
 
-function applySessionFromAuthResponse(me: AuthUser): AuthUser {
-  if (me.session_token) {
-    setSessionToken(me.session_token);
-  }
-  return { user_id: me.user_id, email: me.email, is_admin: me.is_admin };
-}
+const USER_CACHE_KEY = 'plotwise_user_cache';
 
 interface AuthConfig {
   auth_enabled: boolean;
@@ -32,11 +27,46 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+function loadCachedUser(): AuthUser | null {
+  try {
+    const raw = localStorage.getItem(USER_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as AuthUser;
+    if (!parsed.user_id || !parsed.email) return null;
+    return { user_id: parsed.user_id, email: parsed.email, is_admin: !!parsed.is_admin };
+  } catch {
+    return null;
+  }
+}
+
+function cacheUser(user: AuthUser | null): void {
+  try {
+    if (user) {
+      localStorage.setItem(USER_CACHE_KEY, JSON.stringify(user));
+    } else {
+      localStorage.removeItem(USER_CACHE_KEY);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function applySessionFromAuthResponse(me: AuthUser): AuthUser {
+  if (me.session_token) {
+    setSessionToken(me.session_token);
+  }
+  const user = { user_id: me.user_id, email: me.email, is_admin: me.is_admin };
+  cacheUser(user);
+  return user;
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [authEnabled, setAuthEnabled] = useState(false);
   const [allowRegister, setAllowRegister] = useState(true);
-  const [user, setUser] = useState<AuthUser | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(() =>
+    getSessionToken() ? loadCachedUser() : null,
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -46,19 +76,38 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (!config.auth_enabled) {
         setUser(null);
         setSessionToken(null);
+        cacheUser(null);
         return;
       }
+
+      const token = getSessionToken();
+      if (!token) {
+        setUser(null);
+        cacheUser(null);
+        return;
+      }
+
       try {
         const me = await apiGet<AuthUser & { auth_enabled: boolean }>('/auth/me');
-        setUser({ user_id: me.user_id, email: me.email, is_admin: me.is_admin });
-      } catch {
-        setUser(null);
-        setSessionToken(null);
+        const next = { user_id: me.user_id, email: me.email, is_admin: me.is_admin };
+        setUser(next);
+        cacheUser(next);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) {
+          setSessionToken(null);
+          cacheUser(null);
+          setUser(null);
+        } else {
+          // Transient error — keep token; show cached profile until next refresh.
+          const cached = loadCachedUser();
+          setUser(cached);
+        }
       }
     } catch {
       setAuthEnabled(false);
       setUser(null);
       setSessionToken(null);
+      cacheUser(null);
     }
   }, []);
 
@@ -79,9 +128,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const logout = useCallback(async () => {
-    await apiPost('/auth/logout', {});
-    setSessionToken(null);
-    setUser(null);
+    try {
+      await apiPost('/auth/logout', {});
+    } finally {
+      setSessionToken(null);
+      cacheUser(null);
+      setUser(null);
+    }
   }, []);
 
   const value = useMemo(
