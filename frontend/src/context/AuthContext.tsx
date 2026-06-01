@@ -31,17 +31,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
 
   const refresh = useCallback(async () => {
-    const config = await apiGet<AuthConfig>('/auth/config');
-    setAuthEnabled(config.auth_enabled);
-    setAllowRegister(config.allow_register);
-    if (!config.auth_enabled) {
-      setUser(null);
-      return;
-    }
     try {
-      const me = await apiGet<AuthUser & { auth_enabled: boolean }>('/auth/me');
-      setUser({ user_id: me.user_id, email: me.email, is_admin: me.is_admin });
+      const config = await apiGet<AuthConfig>('/auth/config');
+      setAuthEnabled(config.auth_enabled);
+      setAllowRegister(config.allow_register);
+      if (!config.auth_enabled) {
+        setUser(null);
+        return;
+      }
+      try {
+        const me = await apiGet<AuthUser & { auth_enabled: boolean }>('/auth/me');
+        setUser({ user_id: me.user_id, email: me.email, is_admin: me.is_admin });
+      } catch {
+        setUser(null);
+      }
     } catch {
+      setAuthEnabled(false);
       setUser(null);
     }
   }, []);

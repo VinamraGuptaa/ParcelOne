@@ -32,7 +32,11 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def auth_enabled() -> bool:
-    return os.getenv("AUTH_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+    """Auth on when AUTH_ENABLED=1, or by default when DEV=0 (Docker/AWS production)."""
+    raw = os.getenv("AUTH_ENABLED")
+    if raw is not None and raw.strip() != "":
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return os.getenv("DEV", "0").strip().lower() not in {"1", "true", "yes", "on"}
 
 
 def allow_register() -> bool:

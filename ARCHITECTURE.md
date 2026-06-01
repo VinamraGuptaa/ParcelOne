@@ -110,7 +110,7 @@ cd frontend && npm run dev
 
 ## Authentication and sessions
 
-Optional gate for pilot users. Off by default locally (`AUTH_ENABLED=0`); enable on staging/prod.
+Optional gate for pilot users. **On by default in production** (`DEV=0` in Docker); off locally when `DEV=1`. Override with `AUTH_ENABLED=0` or `AUTH_ENABLED=1`.
 
 ### Data model
 
@@ -154,7 +154,7 @@ The active-workflow concurrency guard is **per user** (User A running does not b
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `AUTH_ENABLED` | `0` | Set `1` on staging/prod |
+| `AUTH_ENABLED` | (unset) | Unset + `DEV=0` → on; `DEV=1` → off. Set `0`/`1` to override |
 | `AUTH_ALLOW_REGISTER` | `1` | Set `0` to close public sign-up |
 | `AUTH_SESSION_MAX_AGE` | `604800` | Session TTL in seconds (7 days) |
 | `AUTH_ADMIN_EMAIL` | unset | Bootstrap admin account on startup (with `AUTH_ADMIN_PASSWORD`) |

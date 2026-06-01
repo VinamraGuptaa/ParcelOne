@@ -114,6 +114,25 @@ class TestAuthConfig:
         body = resp.json()
         assert body["auth_enabled"] is False
 
+    async def test_config_enabled_by_default_when_dev_zero(self, auth_engine, monkeypatch):
+        """Docker/AWS: DEV=0 and no AUTH_ENABLED → auth on."""
+        monkeypatch.delenv("AUTH_ENABLED", raising=False)
+        monkeypatch.setenv("DEV", "0")
+
+        Session = async_sessionmaker(auth_engine, class_=AsyncSession, expire_on_commit=False)
+
+        async def override_get_db():
+            async with Session() as session:
+                yield session
+
+        app = create_app()
+        app.dependency_overrides[get_db] = override_get_db
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            resp = await ac.get("/api/auth/config")
+        app.dependency_overrides.clear()
+        assert resp.status_code == 200
+        assert resp.json()["auth_enabled"] is True
+
     async def test_config_when_auth_enabled(self, auth_client: AsyncClient):
         resp = await auth_client.get("/api/auth/config")
         assert resp.status_code == 200
