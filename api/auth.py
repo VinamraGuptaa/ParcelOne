@@ -319,7 +319,7 @@ async def logout(
     return {"ok": True}
 
 
-@router.get("/me", response_model=AuthUserResponse)
+@router.get("/me", response_model=AuthUserResponse, response_model_exclude_none=True)
 async def me(
     request: Request,
     db: AsyncSession = Depends(get_db),

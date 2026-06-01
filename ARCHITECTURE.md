@@ -241,6 +241,10 @@ icy-disk/
 ├── igr_freesearch_scraper.py
 │
 └── tests/
+    ├── test_auth.py                     Auth API (register, login, sessions, isolation)
+    ├── test_auth_edge_cases.py          Refresh/bearer/sliding session/public routes
+    ├── test_auth_helpers.py             Auth env/cookie/bearer unit tests
+    ├── test_auth_frontend_contract.py   Frontend session storage & 401 handling
     ├── test_frontend_react_contract.py  Frontend ↔ backend API contract
     ├── test_frontend_spa_integration.py   SPA + API same-origin
     └── test_workflow_api.py
@@ -268,6 +272,8 @@ Frontend build (Docker only): `VITE_API_BASE=/api`
 ## Test Coverage
 
 Run: `uv run pytest -v`
+
+Auth tests cover: registration/login, bearer token without cookies (page-refresh simulation), sliding session expiry, logout revocation, expired/invalid tokens, per-user workflow/job isolation, admin bootstrap, public vs protected routes, and frontend contracts (`localStorage` token, `ApiError` status 401 handling, cached user on reload).
 
 Contract tests ensure React source stays aligned with FastAPI schemas and routes. SPA integration tests require `cd frontend && npm run build` first.
 

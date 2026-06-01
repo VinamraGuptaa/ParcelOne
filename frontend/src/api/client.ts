@@ -75,7 +75,7 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
         : typeof detail === 'object' && detail !== null && 'message' in detail
           ? String((detail as { message: string }).message)
           : JSON.stringify(detail) ?? `HTTP ${res.status}`;
-    throw Object.assign(new Error(message), { status: res.status, detail });
+    throw new ApiError(message, res.status);
   }
   return res.json() as Promise<T>;
 }

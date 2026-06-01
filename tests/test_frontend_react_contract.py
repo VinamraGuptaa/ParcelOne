@@ -22,6 +22,11 @@ API_CLIENT = FRONTEND_SRC / "api" / "client.ts"
 # Paths the React app is allowed to call (relative to API_BASE, default /api).
 EXPECTED_FRONTEND_API_PATHS = {
     "/health",
+    "/auth/config",
+    "/auth/me",
+    "/auth/login",
+    "/auth/register",
+    "/auth/logout",
     "/workflows",
     "/workflows/land-case-search",
     "/jobs",
